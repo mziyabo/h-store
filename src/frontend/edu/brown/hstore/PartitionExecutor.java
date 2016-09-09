@@ -70,6 +70,7 @@ import org.voltdb.ClientResponseImpl;
 import org.voltdb.DependencySet;
 import org.voltdb.HsqlBackend;
 import org.voltdb.MemoryStats;
+import org.voltdb.AntiCacheMemoryStats;
 import org.voltdb.ParameterSet;
 import org.voltdb.SQLStmt;
 import org.voltdb.SnapshotSiteProcessor;
@@ -102,6 +103,7 @@ import org.voltdb.jni.ExecutionEngineJNI;
 import org.voltdb.jni.MockExecutionEngine;
 import org.voltdb.messaging.FastDeserializer;
 import org.voltdb.messaging.FastSerializer;
+import org.voltdb.types.AntiCacheDBType;
 import org.voltdb.types.SpecExecSchedulerPolicyType;
 import org.voltdb.types.SpeculationConflictCheckerType;
 import org.voltdb.types.SpeculationType;
@@ -181,7 +183,7 @@ import edu.brown.utils.PartitionEstimator;
 import edu.brown.utils.PartitionSet;
 import edu.brown.utils.StringBoxUtil;
 import edu.brown.utils.StringUtil;
-
+import edu.brown.utils.ThreadUtil;
 /**
  * The main executor of transactional work in the system for a single partition.
  * Controls running stored procedures and manages the execution engine's running of plan
@@ -587,7 +589,28 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
             return (this._sitesToNotify != null && this._sitesToNotify.isEmpty() == false);
         }
     }
-    
+    /**
+     * Parse a string for size. Units accepted are K, M, G, T. Format is 4G.
+     * @param size
+     */
+    private long parseSize(String size) {
+        String unit = size.substring(size.length() - 1);
+        long Size = Long.valueOf(size.substring(0, size.length() - 1));
+        if (unit.equals("K")) {
+            Size = Size * 1024;
+        } else if (unit.equals("M")) {
+            Size = Size * 1024*1024;
+        } else if (unit.equals("G")) {
+            Size = Size * 1024*1024*1024;
+        } else if (unit.equals("T")) {
+            Size = Size * 1024*1024*1024*1024;
+        } else {
+            //Throw error
+        }
+        return Size;
+    }
+
+ 
     // ----------------------------------------------------------------------------
     // PROFILING OBJECTS
     // ----------------------------------------------------------------------------
@@ -788,13 +811,51 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                                                 this.site.getHost().getId(),
                                                 "localhost");
                 
-                // Initialize Anti-Cache
+               // Initialize Anti-Cache
                 if (hstore_conf.site.anticache_enable) {
-                    File acFile = AntiCacheManager.getDatabaseDir(this);
-                    long blockSize = hstore_conf.site.anticache_block_size;
-                    eeTemp.antiCacheInitialize(acFile, blockSize);
+                    boolean blockMerge = hstore_conf.site.anticache_block_merge;
+                    if (!hstore_conf.site.anticache_enable_multilevel) {
+                        File acFile = AntiCacheManager.getDatabaseDir(this, 0);
+                        long blockSize = hstore_conf.site.anticache_block_size;
+                        AntiCacheDBType dbType = AntiCacheDBType.get(hstore_conf.site.anticache_dbtype);
+                        boolean blocking = hstore_conf.site.anticache_db_blocks;
+                        // XXX: MJG: TODO: We've got to get a sane value for maxSize. -1 is no bueno.
+                        long dbSize = parseSize(hstore_conf.site.anticache_dbsize);
+                        LOG.info(String.format("Creating AntiCacheDB type: %d blocking: %b blockmerge: %b blocksize: %d maxsize: %d @ %s (dbtype: %s)", 
+                                  dbType.ordinal(), blocking, blockMerge, blockSize, dbSize, acFile.getAbsolutePath(), hstore_conf.site.anticache_dbtype));
+                        eeTemp.antiCacheInitialize(acFile, dbType, blocking, blockSize, dbSize, blockMerge);
+                    } else {
+                    // if we are using multilevel, ignore single config options and parse string
+                        String config = hstore_conf.site.anticache_levels;
+                        String delims = "[;]";
+                        String[] levels = config.split(delims);
+
+                        for (int i = 0; i < levels.length; i++) {
+                            delims = "[,]";
+                            String[] opts = levels[i].split(delims); 
+                            AntiCacheDBType dbType = AntiCacheDBType.get(opts[0]);
+                            
+                            String blockingstr = opts[1];
+                            boolean blocking = Boolean.parseBoolean(blockingstr);
+
+                            String blockstr = opts[2];
+                            long blockSize = parseSize(blockstr);
+
+                            String maxstr = opts[3];
+                            long maxSize = parseSize(maxstr) / catalogContext.numberOfPartitions;
+                            
+                            File acFile = AntiCacheManager.getDatabaseDir(this, i);
+                            LOG.info(String.format("Creating AntiCacheDB type: %d blocking: %b blockMerge: %b blocksize: %d maxsize: %d @ %s", 
+                                  dbType.ordinal(), blocking, blockMerge, blockSize, maxSize, acFile.getAbsolutePath()));
+                            if (i == 0) {
+                                eeTemp.antiCacheInitialize(acFile, dbType, blocking, blockSize, maxSize, blockMerge);
+                            } else {
+                                eeTemp.antiCacheAddDB(acFile, dbType, blocking, blockSize, maxSize, blockMerge);
+                        
+                            }
+                        }
+                    }      
                 }
-                              
                 
                 // Initialize STORAGE_MMAP
                 if (hstore_conf.site.storage_mmap) {
@@ -853,7 +914,8 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
         int num_sites = this.catalogContext.numberOfSites;
         this.tmp_transactionRequestBuilders = new TransactionWorkRequestBuilder[num_sites];
     }
-    
+
+       
     /**
      * Link this PartitionExecutor with its parent HStoreSite
      * This will initialize the references the various components shared among the PartitionExecutors 
@@ -1084,7 +1146,7 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
             LOG.warn("Enabled Distributed Transaction Validation Checker");
         }
         // *********************************** DEBUG ***********************************
-        
+
         // Things that we will need in the loop below
         InternalMessage nextWork = null;
         AbstractTransaction nextTxn = null;
@@ -1142,8 +1204,20 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                         // to wait to see if anything will show up in our work queue.
                         if (hstore_conf.site.specexec_enable && this.lockQueue.approximateIsEmpty() == false) {
                             nextWork = this.work_queue.poll();
+                            /*if (nextWork != null) {
+                                        System.out.println(String.format("Polled a work %s from partition %d",
+                                                                          nextWork.getClass().getSimpleName(), this.work_queue.size()));
+                            } else {
+                                System.out.println("Null work!");
+                            }*/
                         } else {
                             nextWork = this.work_queue.poll(WORK_QUEUE_POLL_TIME, WORK_QUEUE_POLL_TIMEUNIT);    
+                            /*if (nextWork != null) {
+                                        LOG.info(String.format("Polled a work %s from partition %d",
+                                                                          nextWork.getClass().getSimpleName(), this.work_queue.size()));
+                            } else {
+                                LOG.info("Null work!");
+                            }*/
                         }
                     } catch (InterruptedException ex) {
                         continue;
@@ -1191,6 +1265,8 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                     if (this.utilityWork()) {
                         nextWork = UTIL_WORK_MSG;
                     }
+                } else {
+                    ThreadUtil.sleep(5);
                 }
             } // WHILE
         } catch (final Throwable ex) {
@@ -1330,7 +1406,11 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
         if (work instanceof UtilityWorkMessage) {
             // UPDATE MEMORY STATS
             if (work instanceof UpdateMemoryMessage) {
+                //LOG.info("Update mem stats");
                 this.updateMemoryStats(EstTime.currentTimeMillis());
+                if (this.hstore_site.getAntiCacheManager() != null && this.hstore_site.getAntiCacheManager().getEvictableTables().isEmpty() == false) {
+                    this.updateAntiCacheMemoryStats(EstTime.currentTimeMillis());
+                }
             }
             // TABLE STATS REQUEST
             else if (work instanceof TableStatsRequestMessage) {
@@ -1340,6 +1420,8 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                                                        false,
                                                        EstTime.currentTimeMillis());
                 assert(results.length == 1);
+                //results[0].advanceRow();
+                //LOG.info(String.format("Notified ovserver at partition %d", results[0].getLong("PARTITION_ID")));
                 stats_work.getObservable().notifyObservers(results[0]);
             }
             else {
@@ -1389,6 +1471,7 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
      * @param work
      */
     private void processInternalTxnMessage(InternalTxnMessage work) {
+        //LOG.info("process a txn msg");
         AbstractTransaction ts = work.getTransaction();
         this.currentTxn = ts;
         this.currentTxnId = ts.getTransactionId();
@@ -1631,6 +1714,9 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                                 
                 if ((time - this.lastStatsTime) >= 20000) {
                     this.updateMemoryStats(time);
+                    if (this.hstore_site.getAntiCacheManager() != null && this.hstore_site.getAntiCacheManager().getEvictableTables().isEmpty() == false) {
+                        this.updateAntiCacheMemoryStats(time);
+                    }
                 }
             }
             this.lastTickTime = time;
@@ -1646,7 +1732,7 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
     
     
     private void updateMemoryStats(long time) {
-        if (trace.val)
+        //if (trace.val)
             LOG.trace("Updating memory stats for partition " + this.partitionId);
         
         Collection<Table> tables = this.catalogContext.database.getTables();
@@ -1693,52 +1779,36 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
 
             // rollup the table memory stats for this site
             while (stats.advanceRow()) {
-                int idx = 7;
-                tupleCount += stats.getLong(idx++);
-                tupleAccessCount += stats.getLong(idx++);
-                tupleAllocatedMem += (int) stats.getLong(idx++);
-                tupleDataMem += (int) stats.getLong(idx++);
-                stringMem += (int) stats.getLong(idx++);
-                
+                tupleCount += stats.getLong("TUPLE_COUNT");
+                tupleAccessCount += stats.getLong("TUPLE_ACCESSES");
+                tupleAllocatedMem += (int) stats.getLong("TUPLE_ALLOCATED_MEMORY");
+                tupleDataMem += (int) stats.getLong("TUPLE_DATA_MEMORY");
+                stringMem += (int) stats.getLong("STRING_DATA_MEMORY");
+                indexMem += (int) stats.getLong("INDEX_MEMORY");
+
                 // ACTIVE
                 if (hstore_conf.site.anticache_enable) {
-                    tuplesEvicted += (long) stats.getLong(idx++);
-                    blocksEvicted += (long) stats.getLong(idx++);
-                    bytesEvicted += (long) stats.getLong(idx++);
+                    tuplesEvicted += (long) stats.getLong("ANTICACHE_TUPLES_EVICTED");
+                    blocksEvicted += (long) stats.getLong("ANTICACHE_BLOCKS_EVICTED");
+                    bytesEvicted += (long) stats.getLong("ANTICACHE_BYTES_EVICTED");
                 
                     // GLOBAL WRITTEN
-                    tuplesWritten += (long) stats.getLong(idx++);
-                    blocksWritten += (long) stats.getLong(idx++);
-                    bytesWritten += (long) stats.getLong(idx++);
+                    tuplesWritten += (long) stats.getLong("ANTICACHE_TUPLES_WRITTEN");
+                    blocksWritten += (long) stats.getLong("ANTICACHE_BLOCKS_WRITTEN");
+                    bytesWritten += (long) stats.getLong("ANTICACHE_BYTES_WRITTEN");
                     
                     // GLOBAL READ
-                    tuplesRead += (long) stats.getLong(idx++);
-                    blocksRead += (long) stats.getLong(idx++);
-                    bytesRead += (long) stats.getLong(idx++);
+                    tuplesRead += (long) stats.getLong("ANTICACHE_TUPLES_READ");
+                    blocksRead += (long) stats.getLong("ANTICACHE_BLOCKS_READ");
+                    bytesRead += (long) stats.getLong("ANTICACHE_BYTES_READ");
                 }
             }
             stats.resetRowPosition();
         }
 
-        // update index stats
-//        final VoltTable[] s2 = ee.getStats(SysProcSelector.INDEX, tableIds, false, time);
-//        if ((s2 != null) && (s2.length > 0)) {
-//            VoltTable stats = s2[0];
-//            assert(stats != null);
-//            LOG.info("INDEX:\n" + VoltTableUtil.format(stats));
-//
-//            // rollup the index memory stats for this site
-////            while (stats.advanceRow()) {
-////                indexMem += stats.getLong(10);
-////            }
-//            stats.resetRowPosition();
-//
-//            // m_indexStats.setStatsTable(stats);
-//        }
-
         // update the rolled up memory statistics
         MemoryStats memoryStats = hstore_site.getMemoryStatsSource();
-        memoryStats.eeUpdateMemStats(this.siteId,
+        memoryStats.eeUpdateMemStats(this.partitionId,
                                      tupleCount,
                                      tupleDataMem,
                                      tupleAllocatedMem,
@@ -1758,6 +1828,100 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
         
         this.lastStatsTime = time;
     }
+    
+    
+    private void updateAntiCacheMemoryStats(long time) {
+        if (trace.val)
+            LOG.trace("Updating memory stats for partition " + this.partitionId);
+        
+        int numDBs = AntiCacheManager.getNumDBs();
+        int[] acdbIDs = new int[numDBs];
+        for (int i = 0; i < numDBs; ++i) {
+            acdbIDs[i] = i;
+        }
+
+        // data to aggregate
+        int anticacheID = 0;
+        int anticacheType = 0;
+
+        // ACTIVE
+        long blocksEvicted = 0;
+        long bytesEvicted = 0;
+        
+        // GLOBAL WRITTEN
+        long blocksWritten = 0;
+        long bytesWritten = 0;
+        
+        // GLOBAL READ
+        long blocksRead = 0;
+        long bytesRead = 0;
+
+        // FREE 
+        long blocksFree= 0;
+        long bytesFree = 0;
+
+        //System.out.println("From java (before update): " + anticacheID + " " + anticacheType + " " + bytesWritten);
+
+        // update table stats
+        VoltTable[] s1 = null;
+        try {
+            s1 = this.ee.getStats(SysProcSelector.MULTITIER_ANTICACHE, acdbIDs, false, time);
+        } catch (RuntimeException ex) {
+            LOG.warn("Unexpected error when trying to retrieve EE stats for partition " + this.partitionId, ex);
+        }
+        if (s1 != null) {
+            VoltTable stats = s1[0];
+            assert(stats != null);
+
+            // rollup the table memory stats for this site
+            while (stats.advanceRow()) {
+                // ACTIVE
+                if (hstore_conf.site.anticache_enable) {
+                    anticacheID = (int) stats.getLong("ANTICACHE_ID");
+                    anticacheType = (int) stats.getLong("ANTICACHEDB_TYPE");
+
+                    blocksEvicted = (long) stats.getLong("ANTICACHE_BLOCKS_STORED");
+                    bytesEvicted = (long) stats.getLong("ANTICACHE_BYTES_STORED");
+                
+                    // GLOBAL WRITTEN
+                    blocksWritten = (long) stats.getLong("ANTICACHE_TOTAL_BLOCKS_EVICTED");
+                    bytesWritten = (long) stats.getLong("ANTICACHE_TOTAL_BYTES_EVICTED");
+                    
+                    // GLOBAL READ
+                    blocksRead = (long) stats.getLong("ANTICACHE_TOTAL_BLOCKS_UNEVICTED");
+                    bytesRead = (long) stats.getLong("ANTICACHE_TOTAL_BYTES_UNEVICTED");
+
+                    blocksFree = (long) stats.getLong("ANTICACHE_BLOCKS_FREE");
+                    bytesFree = (long) stats.getLong("ANTICACHE_BYTES_FREE");
+                    //System.out.println("From java: partition: " + this.partitionId + " " + anticacheID + " " + anticacheType + " " + blocksWritten + " " + blocksRead);
+                    // update the anticache memory statistics
+                    AntiCacheMemoryStats acmemoryStats = hstore_site.getAntiCacheMemoryStatsSource();
+                    acmemoryStats.eeUpdateMemStats(this.partitionId,
+                                     anticacheID,
+                                     anticacheType,
+                                     
+                                     // ACTIVE
+                                     blocksEvicted, bytesEvicted,
+                                     
+                                     // GLOBAL WRITTEN
+                                     blocksWritten, bytesWritten,
+                                     
+                                     // GLOBAL READ
+                                     blocksRead, bytesRead,
+
+                                     blocksFree, bytesFree
+                    );
+                }
+            }
+            stats.resetRowPosition();
+        } else {
+            LOG.warn("Getting anticache memory stats failed!");
+        }
+
+        
+        this.lastStatsTime = time;
+    }
+    
     
     public void haltProcessing() {
 //        if (debug.val)
@@ -1799,26 +1963,29 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
 
         // IDLE
         if (this.currentDtxn == null) {
-            specType = SpeculationType.IDLE;
+            // If the lock queue is not empty, then that doesn't mean we're really idle I suppose...
+            // if (this.lockQueue.approximateIsEmpty() == false) {
+            specType = SpeculationType.SP1_IDLE;
         }
         // LOCAL
         else if (this.currentDtxn.getBasePartition() == this.partitionId) {
+            // Check whether the DTXN has started executing
             if (((LocalTransaction)this.currentDtxn).isMarkedControlCodeExecuted() == false) {
-                specType = SpeculationType.IDLE;
-            } else if (this.currentDtxn.isMarkedPrepared(this.partitionId)) {
-                specType = SpeculationType.SP3_LOCAL;
-            } else {
                 specType = SpeculationType.SP1_LOCAL;
+            } else if (this.currentDtxn.isMarkedPrepared(this.partitionId)) {
+                specType = SpeculationType.SP4_LOCAL;
+            } else {
+                specType = SpeculationType.SP2_LOCAL;
             }
         }
         // REMOTE
         else {
             if (this.currentDtxn.isMarkedPrepared(this.partitionId)) {
-                specType = SpeculationType.SP3_REMOTE;
+                specType = SpeculationType.SP4_REMOTE;
             } else if (this.currentDtxn.hasExecutedWork(this.partitionId) == false) {
-                specType = SpeculationType.SP2_REMOTE_BEFORE;
+                specType = SpeculationType.SP3_REMOTE_BEFORE;
             } else {
-                specType = SpeculationType.SP2_REMOTE_AFTER;
+                specType = SpeculationType.SP3_REMOTE_AFTER;
             }
         }
 
@@ -2177,10 +2344,10 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
      * @param work
      */
     public void queueUtilityWork(InternalMessage work) {
+        this.work_queue.add(work);
         if (debug.val)
-            LOG.debug(String.format("Added utility work %s to partition %d",
-                      work.getClass().getSimpleName(), this.partitionId));
-        this.work_queue.offer(work);
+            LOG.warn(String.format("Added utility work %s to partition %d with size %d",
+                      work.getClass().getSimpleName(), this.partitionId, this.work_queue.size()));
     }
 
     
@@ -2565,7 +2732,7 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                 LOG.trace(String.format("%s - Queuing ClientResponse [status=%s, origMode=%s, newMode=%s, dtxn=%s]",
                           ts, cresponse.getStatus(), before_mode, this.currentExecMode, this.currentDtxn));
             this.blockClientResponse(ts, cresponse);
-        }
+        } 
     }
     
     /**
@@ -4421,7 +4588,16 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
             if (ts.isPredictSinglePartition()) {
                 if (ts.isMarkedFinished(this.partitionId) == false)
                     this.finishTransaction(ts, status);
-                this.hstore_site.transactionRequeue(ts, status);
+                if (status != Status.ABORT_EVICTEDACCESS || this.hstore_site.getAntiCacheManager().checkQueueBound()) {
+                    this.hstore_site.transactionRequeue(ts, status);
+                //    this.hstore_site.transactionRestart(ts, status);
+                }
+                else {
+                    if (hstore_conf.site.exec_profiling) this.profiler.network_time.start();
+                    this.hstore_site.responseSend(ts, cresponse);
+                    if (hstore_conf.site.exec_profiling) this.profiler.network_time.stopIfStarted();
+                    this.hstore_site.queueDeleteTransaction(ts.getTransactionId(), status);
+                }
             }
             // Send a message all the partitions involved that the party is over
             // and that they need to abort the transaction. We don't actually care when we get the
@@ -4557,7 +4733,7 @@ public class PartitionExecutor implements Runnable, Configurable, Shutdownable {
                         // Check whether we can quickly ignore this speculative txn because
                         // it was executed at a stall point where conflicts don't matter.
                         SpeculationType specType = spec_ts.getSpeculationType();
-                        if (specType != SpeculationType.SP2_REMOTE_AFTER && specType != SpeculationType.SP1_LOCAL) {
+                        if (specType != SpeculationType.SP3_REMOTE_AFTER && specType != SpeculationType.SP2_LOCAL) {
                             continue;
                         }
                         

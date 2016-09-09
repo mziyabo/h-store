@@ -35,7 +35,7 @@ using namespace voltdb;
 
 std::string EvictedTupleAccessException::ERROR_MSG = std::string("Txn tried to access evicted tuples");
 
-EvictedTupleAccessException::EvictedTupleAccessException(int tableId, int numBlockIds, int16_t blockIds[], int32_t tupleIDs[]) :
+EvictedTupleAccessException::EvictedTupleAccessException(int tableId, int numBlockIds, int32_t blockIds[], int32_t tupleIDs[]) :
     SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EVICTED_TUPLE, EvictedTupleAccessException::ERROR_MSG),
         m_tableId(tableId),
         m_numBlockIds(numBlockIds),
@@ -53,11 +53,15 @@ EvictedTupleAccessException::EvictedTupleAccessException(int tableId, int numBlo
 void EvictedTupleAccessException::p_serialize(ReferenceSerializeOutput *output) {
     
     VOLT_TRACE("In EvictedTupleAccessException p_serialize()."); 
+    //  This is hack. But the string buffer in Java layer has limit.
+    //if (m_numBlockIds > 10000)
+    //    m_numBlockIds = 10000;
     
     output->writeInt(m_tableId);
-    output->writeShort(static_cast<short>(m_numBlockIds)); // # of block ids
+    output->writeInt(m_numBlockIds); // # of block ids
+    //output->writeShort(static_cast<short>(m_numBlockIds)); // # of block ids
     for (int ii = 0; ii < m_numBlockIds; ii++) {
-        output->writeShort(m_blockIds[ii]);
+        output->writeInt(m_blockIds[ii]);
     }
     
     for(int ii = 0; ii<m_numBlockIds; ii++) {  // write out the tuple offsets 

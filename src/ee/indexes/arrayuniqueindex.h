@@ -47,7 +47,7 @@ class ArrayUniqueIndex : public TableIndex {
         bool addEntry(const TableTuple *tuples);
         bool deleteEntry(const TableTuple *tuple);
         bool replaceEntry(const TableTuple *oldTupleValue, const TableTuple* newTupleValue);
-        bool setEntryToNewAddress(const TableTuple *tuple, const void* address);
+        bool setEntryToNewAddress(const TableTuple *tuple, const void* address, const void* oldAddress);
         bool exists(const TableTuple* values);
         bool moveToKey(const TableTuple *searchKey);
         bool moveToTuple(const TableTuple *searchTuple);
@@ -56,9 +56,9 @@ class ArrayUniqueIndex : public TableIndex {
 
         bool checkForIndexChange(const TableTuple *lhs, const TableTuple *rhs);
 
-        size_t getSize() const { return 0; }
+        size_t getSize() const { return (num_entries_); }
         int64_t getMemoryEstimate() const {
-            return 0;
+            return sizeof(void*) * ARRAY_INDEX_INITIAL_SIZE;
         }
         std::string getTypeName() const { return "ArrayIntUniqueIndex"; };
 
@@ -68,6 +68,7 @@ class ArrayUniqueIndex : public TableIndex {
         void **entries_;
         int32_t allocated_entries_;
         int32_t match_i_;
+        int32_t num_entries_;
 };
 
 }

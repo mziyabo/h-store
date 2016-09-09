@@ -429,14 +429,14 @@ Java_org_voltdb_jni_ExecutionEngine_nativeLoadTable (
     //JNIEnv pointer can change between calls, must be updated
     updateJNILogProxy(engine);
     engine->setUndoToken(undoToken);
-    VOLT_DEBUG("loading table %d in C++...", table_id);
+    VOLT_TRACE("loading table %d in C++...", table_id);
 
     // convert jboolean to bool
     bool bAllowExport = (allowExport == JNI_FALSE ? false : true);
 
     // deserialize dependency.
     jsize length = env->GetArrayLength(serialized_table);
-    VOLT_DEBUG("deserializing %d bytes ...", (int) length);
+    VOLT_TRACE("deserializing %d bytes ...", (int) length);
     jbyte *bytes = env->GetByteArrayElements(serialized_table, NULL);
     ReferenceSerializeInput serialize_in(bytes, length);
     try {
@@ -444,7 +444,7 @@ Java_org_voltdb_jni_ExecutionEngine_nativeLoadTable (
             bool success = engine->loadTable(bAllowExport, table_id, serialize_in,
                                              txnId, lastCommittedTxnId);
             env->ReleaseByteArrayElements(serialized_table, bytes, JNI_ABORT);
-            VOLT_DEBUG("deserialized table");
+            VOLT_TRACE("deserialized table");
 
             if (success)
                 return org_voltdb_jni_ExecutionEngine_ERRORCODE_SUCCESS;
@@ -884,7 +884,7 @@ Java_org_voltdb_jni_ExecutionEngine_nativeGetStats(JNIEnv *env, jobject obj,
                                                    jintArray locatorsArray,
                                                    jboolean jinterval,
                                                    jlong now) {
-    VOLT_DEBUG("nativeGetStats in C++ called");
+    VOLT_TRACE("nativeGetStats in C++ called");
     VoltDBEngine *engine = castToEngine(pointer);
     Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
     /*
@@ -936,7 +936,7 @@ Java_org_voltdb_jni_ExecutionEngine_nativeGetStats(JNIEnv *env, jobject obj,
 SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeToggleProfiler
 (JNIEnv *env, jobject obj, jlong engine_ptr, jint toggle)
 {
-    VOLT_DEBUG("nativeToggleProfiler in C++ called");
+    VOLT_TRACE("nativeToggleProfiler in C++ called");
     VoltDBEngine *engine = castToEngine(engine_ptr);
     updateJNILogProxy(engine); //JNIEnv pointer can change between calls, must be updated
     if (engine) {
@@ -961,7 +961,7 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeToggl
 SHAREDLIB_JNIEXPORT jboolean JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeReleaseUndoToken
 (JNIEnv *env, jobject obj, jlong engine_ptr, jlong undoToken)
 {
-    VOLT_DEBUG("nativeReleaseUndoToken in C++ called");
+    VOLT_TRACE("nativeReleaseUndoToken in C++ called");
     VoltDBEngine *engine = castToEngine(engine_ptr);
     Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
     try {
@@ -983,7 +983,7 @@ SHAREDLIB_JNIEXPORT jboolean JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeR
 SHAREDLIB_JNIEXPORT jboolean JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeUndoUndoToken
 (JNIEnv *env, jobject obj, jlong engine_ptr, jlong undoToken)
 {
-    VOLT_DEBUG("nativeUndoUndoToken in C++ called");
+    VOLT_TRACE("nativeUndoUndoToken in C++ called");
     VoltDBEngine *engine = castToEngine(engine_ptr);
     Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
     try {
@@ -1450,7 +1450,12 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeAntiC
         jobject obj,
         jlong engine_ptr,
         jstring dbDir,
-        jlong blockSize) {
+        jlong blockSize,
+        jint dbType,
+        jboolean blocking,
+        jlong maxSize,
+        jboolean blockMerge
+        ) {
     
     VOLT_DEBUG("nativeAntiCacheInitialize() start");
     VoltDBEngine *engine = castToEngine(engine_ptr);
@@ -1463,7 +1468,35 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeAntiC
         std::string dbDirString(dbDirChars);
         env->ReleaseStringUTFChars(dbDir, dbDirChars);
         
-        engine->antiCacheInitialize(dbDirString, static_cast<int64_t>(blockSize));
+        engine->antiCacheInitialize(dbDirString, static_cast<AntiCacheDBType>(dbType), blocking, static_cast<int64_t>(blockSize),static_cast<int64_t>(maxSize), blockMerge);
+    } catch (FatalException e) {
+        topend->crashVoltDB(e);
+    }
+    return org_voltdb_jni_ExecutionEngine_ERRORCODE_SUCCESS;
+}
+
+SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeAntiCacheAddDB (
+        JNIEnv *env,
+        jobject obj,
+        jlong engine_ptr,
+        jstring dbDir,
+        jlong blockSize,
+        jint dbType,
+        jboolean blocking,
+        jlong maxSize,
+        jboolean blockMerge
+        ) {
+    VOLT_DEBUG("nativeAntiCacheAddDB() start");
+    VoltDBEngine *engine = castToEngine(engine_ptr);
+    Topend *topend = static_cast<JNITopend*>(engine->getTopend())->updateJNIEnv(env);
+    if (engine == NULL) {
+        return org_voltdb_jni_ExecutionEngine_ERRORCODE_ERROR;
+    }
+    try {
+        const char *dbDirChars = env->GetStringUTFChars(dbDir, NULL);
+        std::string dbDirString(dbDirChars);
+        env->ReleaseStringUTFChars(dbDir, dbDirChars);
+        engine->antiCacheAddDB(dbDirString, static_cast<AntiCacheDBType>(dbType), blocking, static_cast<int64_t>(blockSize), static_cast<int64_t>(maxSize), blockMerge);
     } catch (FatalException e) {
         topend->crashVoltDB(e);
     }
@@ -1475,7 +1508,7 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeAntiC
         jobject obj,
         jlong engine_ptr,
         jint tableId,
-        jshortArray blockIdsArray,
+        jintArray blockIdsArray,
         jintArray offsetsArray) {
     
     int retval = org_voltdb_jni_ExecutionEngine_ERRORCODE_ERROR;
@@ -1486,7 +1519,7 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeAntiC
     
     try {
         jsize numBlockIds = env->GetArrayLength(blockIdsArray);
-        jshort *_blockIds = env->GetShortArrayElements(blockIdsArray, NULL);
+        jint *_blockIds = env->GetIntArrayElements(blockIdsArray, NULL);
         jint *_tupleOffsets = env->GetIntArrayElements(offsetsArray, NULL); 
         if (_blockIds == NULL) {
             VOLT_ERROR("No evicted blockIds were given to the EE");
@@ -1496,9 +1529,15 @@ SHAREDLIB_JNIEXPORT jint JNICALL Java_org_voltdb_jni_ExecutionEngine_nativeAntiC
             VOLT_ERROR("No evicted tuple offsets were given to the EE");
             return (retval);
         }
+
+        /*
+        if (numBlockIds != 0) {
+            VOLT_ERROR("numBlock from jni: %d", numBlockIds);
+        }
+        */
         
         // XXX: Is this necessary?
-        int16_t *blockIds = new int16_t[numBlockIds];
+        int32_t *blockIds = new int32_t[numBlockIds];
         for (int ii = 0; ii < numBlockIds; ii++) {
             blockIds[ii] = _blockIds[ii];
         } // FOR

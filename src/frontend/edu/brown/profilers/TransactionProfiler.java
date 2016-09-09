@@ -92,7 +92,7 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
      * transaction was stalled. Note that only distributed transactions 
      * will have speculative txns interleaved with it.
      */
-    private int num_speculative = 0;
+//    private int num_speculative = 0;
     
     /**
      * Early 2PC Optimization Partitions
@@ -407,6 +407,10 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
      * The amount of time spent estimating what the transaction will do
      */
     protected final ProfileMeasurement pm_exec_est = new ProfileMeasurement("EXEC_EST");
+    /**
+     * The amount of time spent before the transaction access an evicted tuple
+     */
+    protected final ProfileMeasurement pm_exec_evicted_access = new ProfileMeasurement("EXEC_EVICTED_ACCESS");
 
     /**
      * Invoked when the txn has been removed from the queue and is starting to execute at a local PartitionExecutor
@@ -425,6 +429,8 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
         if (this.singlePartitioned == false) {
             this.pm_first_remote_query.start(timestamp);
         }
+
+        this.pm_exec_evicted_access.start(timestamp);
     }
     
     /**
@@ -486,6 +492,16 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
         this.stopInner(this.pm_exec_ee, this.pm_exec_total, false);
     }
 
+    public void stopExecEvictedAccess() {
+        if (this.disabled) return;
+        this.pm_exec_evicted_access.stop();
+    }
+
+    public void clearExecEvictedAccess() {
+        if (this.disabled) return;
+        this.pm_exec_evicted_access.clear();
+    }
+    
     // ---------------------------------------------------------------
     // CLEAN-UP TIMES
     // ---------------------------------------------------------------
@@ -601,9 +617,9 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
     public void addPrefetchUnusedQuery(int num_queries) {
         this.num_prefetched_unused += num_queries;
     }
-    public void addSpeculativeTransaction(int num_txns) {
-        this.num_speculative += num_txns;
-    }
+//    public void addSpeculativeTransaction(int num_txns) {
+//        this.num_speculative += num_txns;
+//    }
     
     public int getBatchCount() {
         return (this.num_batches);
@@ -620,9 +636,9 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
     public int getPrefetchQueryUnusedCount() {
         return (this.num_prefetched_unused);
     }
-    public int getSpeculativeTransactionCount() {
-        return (this.num_speculative);
-    }
+//    public int getSpeculativeTransactionCount() {
+//        return (this.num_speculative);
+//    }
     
     // ---------------------------------------------------------------
     // UTILITY METHODS
@@ -673,15 +689,14 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
         this.num_remote_queries = 0;
         this.num_prefetched = 0;
         this.num_prefetched_unused = 0;
-        this.num_speculative = 0;
+//        this.num_speculative = 0;
     }
 
     /**
      * Disable all profiling for this transaction
      */
     public void disableProfiling() {
-        if (debug.val)
-            LOG.debug("Disabling transaction profiling");
+        if (trace.val) LOG.trace("Disabling transaction profiling");
         this.disabled = true;
     }
 
@@ -689,8 +704,7 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
      * Enable profiling for this transaction This should only be invoked before the txn starts
      */
     public void enableProfiling() {
-        if (debug.val)
-            LOG.debug("Enabling transaction profiling");
+        if (trace.val) LOG.trace("Enabling transaction profiling");
         this.disabled = false;
     }
 
@@ -735,7 +749,7 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
     public boolean isInitialized() {
         return true;
     }
-
+    
     @Override
     public Map<String, Object> debugMap() {
         Map<String, Object> m = super.debugMap();
@@ -745,7 +759,7 @@ public class TransactionProfiler extends AbstractProfiler implements Poolable {
         m.put("# of Remote Queries", this.num_queries);
         m.put("# of Prefetched Queries", this.num_prefetched);
         m.put("# of Unused Prefetched Queries", this.num_prefetched_unused);
-        m.put("# of Speculative Txns", this.num_speculative);
+//        m.put("# of Speculative Txns", this.num_speculative);
 
         // HISTORY
         String history = "";

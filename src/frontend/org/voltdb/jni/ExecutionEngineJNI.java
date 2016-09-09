@@ -39,10 +39,12 @@ import org.voltdb.export.ExportProtoMessage;
 import org.voltdb.messaging.FastDeserializer;
 import org.voltdb.messaging.FastSerializer;
 import org.voltdb.messaging.FastSerializer.BufferGrowCallback;
+import org.voltdb.types.AntiCacheDBType;
 import org.voltdb.utils.DBBPool.BBContainer;
 
 import edu.brown.hstore.HStoreConstants;
 import edu.brown.hstore.PartitionExecutor;
+import edu.brown.hstore.conf.HStoreConf;
 import edu.brown.logging.LoggerUtil;
 import edu.brown.logging.LoggerUtil.LoggerBoolean;
 
@@ -775,23 +777,33 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     // ----------------------------------------------------------------------------
 
     @Override
-    public void antiCacheInitialize(File dbDir, long blockSize) throws EEException {
+    public void antiCacheInitialize(File dbDir, AntiCacheDBType dbType, boolean blocking, long blockSize, long maxSize, boolean blockMerge) throws EEException {
         assert(m_anticache == false);
-        
+
         // TODO: Switch to LOG.debug
         if (debug.val) {
             LOG.debug("Initializing anti-cache feature at partition " + this.executor.getPartitionId());
             LOG.debug("****************");
             LOG.debug(String.format("Partition #%d AntiCache Directory: %s",
                       this.executor.getPartitionId(), dbDir.getAbsolutePath()));
+            LOG.debug(String.format("AntiCacheDBType: %d", dbType.ordinal()));
         }
-        final int errorCode = nativeAntiCacheInitialize(this.pointer, dbDir.getAbsolutePath(), blockSize);
+      
+        final int errorCode = nativeAntiCacheInitialize(this.pointer, dbDir.getAbsolutePath(), blockSize, dbType.ordinal(), blocking,  maxSize, blockMerge);
         checkErrorCode(errorCode);
         m_anticache = true;
     }
+
+    @Override
+    public void antiCacheAddDB(File dbDir, AntiCacheDBType dbType, boolean blocking, long blockSize, long maxSize, boolean blockMerge) throws EEException {
+        assert(m_anticache == true);
+        final int errorCode = nativeAntiCacheAddDB(this.pointer, dbDir.getAbsolutePath(), blockSize, dbType.ordinal(), blocking, maxSize, blockMerge);
+        checkErrorCode(errorCode);
+    }
+
     
     @Override
-    public void antiCacheReadBlocks(Table catalog_tbl, short[] block_ids, int[] tuple_offsets) {
+    public void antiCacheReadBlocks(Table catalog_tbl, int[] block_ids, int[] tuple_offsets) {
         if (m_anticache == false) {
             String msg = "Trying to invoke anti-caching operation but feature is not enabled";
             throw new VoltProcedure.VoltAbortException(msg);

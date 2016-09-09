@@ -39,6 +39,7 @@ import org.voltdb.messaging.FastDeserializer;
 import org.voltdb.utils.DBBPool.BBContainer;
 import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.VoltLoggerFactory;
+import org.voltdb.types.AntiCacheDBType;
 
 import edu.brown.hstore.HStore;
 import edu.brown.hstore.PartitionExecutor;
@@ -793,17 +794,34 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
      * Initialize anti-caching at this partition's EE.
      * <B>NOTE:</B> This must be invoked before loadCatalog is invoked
      * @param dbDir
+     * @param dbType
+     * @param blocking
      * @param blockSize TODO
+     * @param maxSize
+     * @param blockMerge
      * @throws EEException
      */
-    public abstract void antiCacheInitialize(File dbDir, long blockSize) throws EEException;
+    public abstract void antiCacheInitialize(File dbDir, AntiCacheDBType dbType, boolean blocking, long blockSize, long maxSize, boolean blockMerge) throws EEException;
+
+    /**
+     * Initialize additional levels of anticaching DBs.
+     * <B>NOTE:</B> This can only be invoked after antiCacheInitialize is invoked
+     * @param dbDir
+     * @param AntiCacheDBType
+     * @param blocking
+     * @param blockSize
+     * @param maxSize 
+     * @param blockMerge
+     * @throws EEException
+     */
+    public abstract void antiCacheAddDB(File dbDir, AntiCacheDBType dbType, boolean blocking, long blockSize, long maxSize, boolean blockMerge) throws EEException;
     
     /**
      * 
      * @param catalog_tbl
      * @param block_ids
      */
-    public abstract void antiCacheReadBlocks(Table catalog_tbl, short block_ids[], int tuple_offsets[]);
+    public abstract void antiCacheReadBlocks(Table catalog_tbl, int block_ids[], int tuple_offsets[]);
 
     /**
      * Forcibly tell the EE that it needs to evict a certain number of bytes
@@ -839,9 +857,28 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
      * @param pointer
      * @param dbDir
      * @param blockSize TODO
+     * @param dbType
+     * @param blocking
+     * @param maxSize
+     * @param blockMerge
      * @return
      */
-    protected native int nativeAntiCacheInitialize(long pointer, String dbDir, long blockSize);
+    protected native int nativeAntiCacheInitialize(long pointer, String dbDir, long blockSize, int dbtype, boolean blocking, long maxSize, boolean blockMerge);
+
+    /** 
+     * Adds new additional AntiCacheDB instances for multilevel anticaching. The database
+     *  directory path should be unique and exist. The existance of multilevel databases
+     * is checked in the front end.
+     * @param pointer
+     * @param dbDir
+     * @param blockSize
+     * @param dbType
+     * @param blocking
+     * @param maxSize
+     * @param blockMerge
+     * @return
+     */
+    protected native int nativeAntiCacheAddDB(long pointer, String dbDir, long blockSize, int dbtype, boolean blocking, long maxSize, boolean blockMerge);
     
      /**
      * 
@@ -850,7 +887,7 @@ public abstract class ExecutionEngine implements FastDeserializer.Deserializatio
      * @param block_ids
      * @return
      */
-    protected native int nativeAntiCacheReadBlocks(long pointer, int tableId, short block_ids[], int tuple_offsets[]);
+    protected native int nativeAntiCacheReadBlocks(long pointer, int tableId, int block_ids[], int tuple_offsets[]);
     
     /**
      * 

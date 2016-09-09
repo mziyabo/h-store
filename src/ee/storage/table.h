@@ -57,6 +57,7 @@
 #include "common/Pool.hpp"
 #include "common/tabletuple.h"
 #include "common/MMAPMemoryManager.h"
+#include "anticache/AntiCacheDB.h"
 
 namespace voltdb {
 
@@ -221,6 +222,8 @@ public:
     inline int32_t getTuplesRead() const { return (m_tuplesRead); }
     inline int32_t getBlocksRead() const { return (m_blocksRead); }
     inline int64_t getBytesRead()  const { return (m_bytesRead); }
+
+    virtual std::vector<AntiCacheDB*> allACDBs() const;
     #endif
     
     int getTupleID(const char* tuple_address); 
@@ -411,6 +414,15 @@ protected:
     int64_t m_bytesRead;
 #endif
 
+#ifdef ANTICACHE_TIMESTAMPS_PRIME
+    // track the position of where we're eviction so far
+    std::vector<int> m_evictPosition;
+
+    // which prime we use as the step
+    std::vector<int> m_stepPrime;
+#endif
+
+
 #ifdef MEMCHECK_NOFREELIST
     int64_t m_deletedTupleCount;
     //Store pointers to all allocated tuples so they can be freed on destruction
@@ -499,6 +511,10 @@ inline void Table::allocateNextBlock() {
 #endif
     char *memory = (char*)(new char[bytes]);
     m_data.push_back(memory);
+#ifdef ANTICACHE_TIMESTAMPS_PRIME
+    m_evictPosition.push_back(0);
+    m_stepPrime.push_back(-1);
+#endif
 #ifdef MEMCHECK_NOFREELIST
     assert(m_allocatedTuplePointers.insert(memory).second);
     m_deletedTuplePointers.erase(memory);
@@ -520,6 +536,7 @@ inline int Table::getTupleID(const char* tuple_address)
     int tuple_id = 0; 
     
     int tuple_size = m_schema->tupleLength() + TUPLE_HEADER_SIZE; 
+    long offset;
     
     for(int i = 0; i < m_data.size(); i++)  // iterate through blocks
     {
@@ -532,8 +549,12 @@ inline int Table::getTupleID(const char* tuple_address)
             tuple_id += m_tuplesPerBlock; 
             continue; 
         }
+
+        offset = ((long)tuple_address - (long)addr) / tuple_size;
+        if (addr + offset * tuple_size == tuple_address)
+            return tuple_id + (int)offset;
         
-        for(int j = 0; j < m_tuplesPerBlock; j++)  // iterate through tuples in a block
+        /*for(int j = 0; j < m_tuplesPerBlock; j++)  // iterate through tuples in a block
         {
             if(addr == tuple_address)
             {
@@ -542,7 +563,7 @@ inline int Table::getTupleID(const char* tuple_address)
             
             addr += tuple_size; // advance pointer to next tuple
             tuple_id++; 
-        }
+        }*/
         
     }
     
@@ -573,6 +594,7 @@ inline void Table::deleteTupleStorage(TableTuple &tuple) {
 inline void Table::deleteTupleStorage(TableTuple &tuple) {
     tuple.setDeletedTrue(); // does NOT free strings
     tuple.setEvictedFalse();
+    tuple.setNVMEvictedFalse();
 
     // add to the free list
     m_tupleCount--;

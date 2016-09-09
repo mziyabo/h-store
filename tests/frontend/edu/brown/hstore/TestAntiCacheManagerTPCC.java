@@ -152,7 +152,7 @@ public class TestAntiCacheManagerTPCC extends BaseTestCase {
         
         // Now force the EE to evict our boys out
         // We'll tell it to remove 1MB, which is guaranteed to include all of our tuples
-        VoltTable evictResult = this.ee.antiCacheEvictBlock(catalog_tbl, 1024 * 1024, 1);
+        VoltTable evictResult = this.ee.antiCacheEvictBlock(catalog_tbl, 1024 * 256, 1);
 
         System.err.println("-------------------------------");
         System.err.println(VoltTableUtil.format(evictResult));
@@ -364,7 +364,7 @@ public class TestAntiCacheManagerTPCC extends BaseTestCase {
      */
     @Test
     public void testReadNonExistentBlock() throws Exception {
-        short block_ids[] = new short[]{ 1111 };
+        int block_ids[] = new int[]{ 1111 };
         int offsets[] = new int[]{0};
         boolean failed = false;
         try {

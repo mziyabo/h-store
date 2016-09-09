@@ -40,6 +40,8 @@ public class TestAntiCacheManager extends BaseTestCase {
     private static final int NUM_PARTITIONS = 1;
     private static final int NUM_TUPLES = 10;
     private static final String TARGET_TABLE = YCSBConstants.TABLE_NAME;
+
+    private String readBackTracker;
     
     private static final String statsFields[] = {
         "ANTICACHE_TUPLES_EVICTED",
@@ -84,6 +86,7 @@ public class TestAntiCacheManager extends BaseTestCase {
         this.hstore_conf.site.anticache_profiling = true;
         this.hstore_conf.site.anticache_check_interval = Integer.MAX_VALUE;
         this.hstore_conf.site.anticache_dir = this.anticache_dir.getAbsolutePath();
+        this.hstore_conf.site.anticache_dbtype = "BERKELEY";
         
         this.hstore_site = createHStoreSite(catalog_site, hstore_conf);
         this.executor = hstore_site.getPartitionExecutor(0);
@@ -113,6 +116,7 @@ public class TestAntiCacheManager extends BaseTestCase {
             Object row[] = VoltTableUtil.getRandomRow(catalog_tbl);
             row[0] = i;
             vt.addRow(row);
+            if (i == 1) readBackTracker = row[1].toString();
         } // FOR
         this.executor.loadTable(1000l, catalog_tbl, vt, false);
         
@@ -133,7 +137,7 @@ public class TestAntiCacheManager extends BaseTestCase {
 
         // Now force the EE to evict our boys out
         // We'll tell it to remove 1MB, which is guaranteed to include all of our tuples
-        VoltTable evictResult = this.ee.antiCacheEvictBlock(catalog_tbl, 1024 * 500, 1);
+        VoltTable evictResult = this.ee.antiCacheEvictBlock(catalog_tbl, 1024 * 256, 1);
 
         System.err.println("-------------------------------");
         System.err.println(VoltTableUtil.format(evictResult));
@@ -255,12 +259,15 @@ public class TestAntiCacheManager extends BaseTestCase {
         boolean adv = results[0].advanceRow();
         assertTrue(adv);
         assertEquals(expected, results[0].getLong(0));
+
+        // try to read a content back
+        assertEquals(readBackTracker, results[0].getString(1));
         
         AntiCacheManagerProfiler profiler = hstore_site.getAntiCacheManager().getDebugContext().getProfiler(0);
         assertNotNull(profiler);
         assertEquals(1, profiler.evictedaccess_history.size());
 
-	evicted = evictResult.getLong("ANTICACHE_TUPLES_EVICTED");
+        evicted = evictResult.getLong("ANTICACHE_TUPLES_EVICTED");
         assertTrue("No tuples were evicted!"+evictResult, evicted > 0);
     }
         
@@ -353,7 +360,7 @@ public class TestAntiCacheManager extends BaseTestCase {
 
     @Test
     public void testReadNonExistentBlock() throws Exception {
-        short block_ids[] = new short[]{ 1111 };
+        int block_ids[] = new int[]{ 1111 };
         int tuple_offsets[] = new int[]{0}; 
         boolean failed = false;
         try {

@@ -620,7 +620,34 @@ public final class HStoreConf {
             experimental=true
         )
         public boolean anticache_enable;
-        
+
+        @ConfigProperty(
+            description="Enable anti-caching warmup feature. This requires that the system "+
+                        "is compiled with both ${site.anticache_enabled} and ${site.anticache_build "+
+                        "set to true.",
+            defaultBoolean=true,
+            experimental=true
+        )
+        public boolean anticache_warmup_eviction_enable;
+
+        @ConfigProperty(
+            description="Reserved eviction time for anti-caching after warmup of the benchmark. This requires that the system "+
+                        "is compiled with ${site.anticache_warmup_eviction_enable}  "+
+                        "set to true.",
+            defaultInt = 0000,
+            experimental=true
+        )
+        public int anticache_warmup_eviction_time;
+
+        @ConfigProperty(
+            description="Enable multilevel anti-caching feature. This requires that the system "+
+                        "is compiled with both ${site.anticache_enabled} and ${site.anticache_build "+
+                        "set to true.",
+            defaultBoolean=false,
+            experimental=true
+        )
+        public boolean anticache_enable_multilevel;
+
         @ConfigProperty(
             description="Build the anti-cache feature when compiling the H-Store source code. " +
             		    "You probably always want to leave this flag enabled.",
@@ -653,11 +680,40 @@ public final class HStoreConf {
         public String anticache_dir;
 
         @ConfigProperty(
-            description="The size (in bytes) for the anti-cache's blocks on disk.",
+            description="Configuration options for multilevel anticaching. Up to five " +
+                        "levels can be set up. The format is type,blocking,block_size,db_size; " +
+                        "The default is 'NVM,true,256K,64G;BERKELEY,false,256K,128G'.",
+            defaultString="NVM,true,256K,64G;BERKELEY,false,256K,128G",
+            experimental=true
+        )
+        public String anticache_levels;       
+
+
+        @ConfigProperty(
+            description="The directories used for multilevel anticaching databases.",
+            defaultString="${global.temp_dir}/ac-level1;${global.temp_dir}/ac-level2;" +
+                          "${global.temp_dir}/ac-level3;${global.temp_dir}/ac-level4;" +
+                          "${global.temp_dir}/ac-level5",
+            experimental=true
+        )
+        public String anticache_multilevel_dirs;
+
+        @ConfigProperty(
+            description="The size (in bytes) for the anti-cache's blocks on disk." +
+                        "WARNING: this seem to be buggy/broken. Please leave the default " +
+                        "value of 256KB (262144) unless you know what you're doing.",
             defaultLong=262144, // 256kb
+            //defaultLong=1048576, // 1MB
             experimental=true
         )
         public long anticache_block_size;
+
+        @ConfigProperty(
+            description="The size of the anticache database.",
+            defaultString="2G",
+            experimental=true
+        )
+        public String anticache_dbsize;
         
         @ConfigProperty(
             description="Reset the anti-cache database directory for each partition when " +
@@ -710,6 +766,53 @@ public final class HStoreConf {
         	    experimental=false
         )
         public boolean anticache_batching;
+
+        @ConfigProperty(
+                description="Type of database for the highest level eviction",
+                defaultString="BERKELEY",
+                experimental=true,
+                enumOptions="org.voltdb.types.AntiCacheDBType"
+        )
+        public String anticache_dbtype;
+
+        @ConfigProperty(
+                description="Top level database blocks for evictions",
+                defaultBoolean=false,
+                experimental=true
+        )
+        public boolean anticache_db_blocks;
+       
+        @ConfigProperty(
+                description="Merge entire block when unevicting. False merges just a single tuple",
+                defaultBoolean=true,
+                experimental=true
+        )
+        public boolean anticache_block_merge;
+
+        @ConfigProperty(
+            description="Enable the anti-cache counted merge-back feature. This requires that the system " +
+            		    "is compiled with ${site.anticache_enable} set to true and " +
+                            "${site.anticache_db_blocks} set to true.",
+            defaultBoolean=false,
+            experimental=true
+        )
+        public boolean anticache_counter;
+
+        @ConfigProperty(
+            description="Enable the anti-cache timestamps feature. This requires that the system " +
+            		    "is compiled with ${site.anticache_enable} set to true.",
+            defaultBoolean=true,
+            experimental=true
+        )
+        public boolean anticache_timestamps;
+        
+        @ConfigProperty(
+            description="Enable the anti-cache timestamps use a prime sample strategy instead of radom-tuple sampling." +
+            		    "This is compiled with ${site.anticache_timestamps} set to true.",
+            defaultBoolean=true,
+            experimental=true
+        )
+        public boolean anticache_timestamps_prime;
         
         // ----------------------------------------------------------------------------
         // Storage MMAP Options
@@ -934,6 +1037,16 @@ public final class HStoreConf {
             experimental=false
         )
         public double txn_profiling_sample;
+        
+        @ConfigProperty(
+            description="If this is set to true, then each HStoreSite will write out a CSV file on its " +
+            		    "local filesystem that contains a dump of the runtime profiling information for " +
+            		    "each transaction. Check the site log for the output name of each file. " +
+                        "Note that the the ${site.txn_profiling} parameter must also be enabled.",
+            defaultBoolean=false,
+            experimental=false
+        )
+        public boolean txn_profiling_dump;
         
         @ConfigProperty(
             description="Enable transaction execution mode counting. This will cause the HStoreSite to keep " +
@@ -1559,7 +1672,7 @@ public final class HStoreConf {
             description="When the BlockingClient is enabled with ${client.blocking}, this defines the number " +
                         "of concurrent transactions that each client instance can submit to the H-Store cluster " +
                         "before it will block.",
-            defaultInt=1,
+            defaultInt=500,
             experimental=false
         )
         public int blocking_concurrent;
@@ -1819,7 +1932,7 @@ public final class HStoreConf {
             defaultNull=true,
             experimental=false
         )
-        public String output_memory;
+        public String output_memory_stats;
         
         @ConfigProperty(
             description="Defines the path where the BenchmarkController will dump a CSV containing " +
@@ -1892,6 +2005,16 @@ public final class HStoreConf {
         
         @ConfigProperty(
             description="Defines the path where the BenchmarkController will dump a CSV containing " +
+                        "the memory stats of different tiers of anti-cache. This can work with single-tier" +
+                        "anti-cache. ${site.anticache_enable} should be set to true to enable this feature." +
+                        "Any file that exists with the same name as this will be overwritten.",
+            defaultNull=true,
+            experimental=false
+        )
+        public String output_anticache_memory_stats;
+        
+        @ConfigProperty(
+            description="Defines the path where the BenchmarkController will dump a CSV containing " +
                     "transaction profiling stats. Note that this will automatically enable " +
                     "${site.txn_profiling}, which will affect the runtime performance." +
                     "Any file that exists with the same name as this will be overwritten.",
@@ -1960,15 +2083,6 @@ public final class HStoreConf {
         )
         public String output_table_stats;
 
-        @ConfigProperty(
-                description="Defines the path where the BenchmarkController will dump a CSV containing " +
-                            "the memory stats information about the cluster periodically. This will periodically invoke " +
-                            "the @Statistics system stored procedure to collect SysProcSelector.TABLE data.",
-                defaultNull=true,
-                experimental=false
-            )
-        public String output_table_stats_periodically;
-        
         @ConfigProperty(
             description="Defines the path where the BenchmarkController will dump a CSV containing " +
                         "transaction counter stats. This will contain information about how the " +

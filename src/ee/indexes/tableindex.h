@@ -56,6 +56,7 @@
 #include "common/tabletuple.h"
 #include "common/TupleSchema.h"
 #include "indexes/IndexStats.h"
+#include "indexes/allocatortracker.h"
 
 namespace voltdb {
 
@@ -145,7 +146,7 @@ public:
     virtual bool replaceEntry(const TableTuple *oldTupleValue,
                               const TableTuple *newTupleValue) = 0;
     
-    virtual bool setEntryToNewAddress(const TableTuple *tuple, const void* address) = 0; 
+    virtual bool setEntryToNewAddress(const TableTuple *tuple, const void* address, const void* oldAddress) = 0; 
     
     
     /**
@@ -344,6 +345,9 @@ protected:
     
     // stats
     IndexStats m_stats;
+
+    // index memory size
+    int64_t m_memoryEstimate;
 };
 
 }

@@ -29,7 +29,8 @@ StringRef::create(size_t size, Pool* dataPool)
     if (dataPool != NULL)
     {
         retval =
-            new(dataPool->allocate(sizeof(StringRef))) StringRef(size, dataPool);
+            new StringRef(size, dataPool);
+            //new(dataPool->allocate(sizeof(StringRef))) StringRef(size, dataPool);
     }
     else
     {
@@ -49,6 +50,7 @@ StringRef::StringRef(size_t size)
     m_size = size + sizeof(StringRef*);
     m_tempPool = false;
     m_stringPtr = new char[m_size];
+    //printf("m_stringPtr: %p\n", m_stringPtr);
     setBackPtr();
 }
 

@@ -93,12 +93,14 @@ Table* StatsAgent::getStats(voltdb::StatisticsSelectorType sst,
         voltdb::StatsSource *ss = (*statsSources)[catalogIds[ii]];
         assert (ss != NULL);
         if (ss == NULL) {
+            VOLT_ERROR("Missing StatsSource for CatalogId #%d\n", catalogIds[ii]);
             continue;
         }
 
         voltdb::TableTuple *statsTuple = ss->getStatsTuple(interval, now);
         statsTable->insertTuple(*statsTuple);
     }
+
     return statsTable;
 }
 

@@ -101,6 +101,7 @@ import org.voltdb.sysprocs.NoOp;
 import org.voltdb.sysprocs.Quiesce;
 import org.voltdb.sysprocs.ResetProfiling;
 import org.voltdb.sysprocs.Statistics;
+import org.voltdb.sysprocs.SetConfiguration;
 import org.voltdb.utils.LogKeys;
 import org.voltdb.utils.Pair;
 import org.voltdb.utils.VoltTableUtil;
@@ -110,6 +111,7 @@ import edu.brown.api.results.BenchmarkResults;
 import edu.brown.api.results.CSVResultsPrinter;
 import edu.brown.api.results.JSONResultsPrinter;
 import edu.brown.api.results.MemoryStatsPrinter;
+import edu.brown.api.results.AnticacheMemoryStatsPrinter;
 import edu.brown.api.results.TableStatsPrinter;
 import edu.brown.api.results.ResponseEntries;
 import edu.brown.api.results.ResultsChecker;
@@ -940,20 +942,29 @@ public class BenchmarkController {
         }
         
         // Memory Stats Output
-        if (hstore_conf.client.output_memory != null && hstore_conf.client.output_memory.isEmpty() == false) {
-            if (hstore_conf.client.output_memory.equalsIgnoreCase("true")) {
-                LOG.warn("The HStoreConf parameter 'hstore_conf.client.output_memory' should be a file path, not a boolean value");
+        if (hstore_conf.client.output_memory_stats != null && hstore_conf.client.output_memory_stats.isEmpty() == false) {
+            if (hstore_conf.client.output_memory_stats.equalsIgnoreCase("true")) {
+                LOG.warn("The HStoreConf parameter 'hstore_conf.client.output_memory_stats' should be a file path, not a boolean value");
             }
-            File f = new File(hstore_conf.client.output_memory);
+            File f = new File(hstore_conf.client.output_memory_stats);
             this.registerInterest(new MemoryStatsPrinter(this.getClientConnection(), f));
         }
         
-        // Table Stats Output
-        if (hstore_conf.client.output_table_stats_periodically != null && hstore_conf.client.output_table_stats_periodically.isEmpty() == false) {
-            if (hstore_conf.client.output_table_stats_periodically.equalsIgnoreCase("true")) {
-                LOG.warn("The HStoreConf parameter 'hstore_conf.client.output_table_stats_periodically' should be a file path, not a boolean value");
+        // Anticache Memory Stats Output
+        if (hstore_conf.client.output_anticache_memory_stats != null && hstore_conf.client.output_anticache_memory_stats.isEmpty() == false) {
+            if (hstore_conf.client.output_anticache_memory_stats.equalsIgnoreCase("true")) {
+                LOG.warn("The HStoreConf parameter 'hstore_conf.client.output_anticache_memory_stats' should be a file path, not a boolean value");
             }
-            File f = new File(hstore_conf.client.output_table_stats_periodically);
+            File f = new File(hstore_conf.client.output_anticache_memory_stats);
+            this.registerInterest(new AnticacheMemoryStatsPrinter(this.getClientConnection(), f));
+        }
+        
+        // Table Stats Output
+        if (hstore_conf.client.output_table_stats != null && hstore_conf.client.output_table_stats.isEmpty() == false) {
+            if (hstore_conf.client.output_table_stats.equalsIgnoreCase("true")) {
+                LOG.warn("The HStoreConf parameter 'hstore_conf.client.output_table_stats' should be a file path, not a boolean value");
+            }
+            File f = new File(hstore_conf.client.output_table_stats);
             this.registerInterest(new TableStatsPrinter(this.getClientConnection(), f));
         }
 
@@ -1157,14 +1168,14 @@ public class BenchmarkController {
 
         // Warm-up
         if (hstore_conf.client.warmup > 0) {
-            LOG.info(String.format("Letting system warm-up for %.01f seconds", hstore_conf.client.warmup / 1000.0));
+            LOG.info(String.format("Letting the system warm-up for %.01f seconds", hstore_conf.client.warmup / 1000.0));
             
             try {
                 Thread.sleep(hstore_conf.client.warmup);
             } catch (InterruptedException e) {
                 if (debug.val) LOG.debug("Warm-up was interrupted!");
             }
-            
+
             if (this.stop == false) {
                 // Recompute Markovs
                 // We don't need to save them to a file though
@@ -1198,6 +1209,22 @@ public class BenchmarkController {
             }
         }
         
+        if (hstore_conf.site.anticache_warmup_eviction_enable) {
+            try {
+                local_client.callProcedure(VoltSystemProcedure.procCallName(SetConfiguration.class),
+                                     new Object[]{ new String[] { "site.anticache_warmup_eviction_enable" },
+                                                   new String[] { "false" } });
+            } catch (Exception ex) {
+                throw new Exception("Failed to enable anticache", ex);
+            }
+
+            // Suspend the clients if we want to evict the database size to the threshold after warmup period
+            if (hstore_conf.site.anticache_warmup_eviction_time > 0) {
+                LOG.info(String.format("Letting system evict for %.01f seconds", hstore_conf.site.anticache_warmup_eviction_time / 1000.0));
+                clientPSM.writeToAll(ControlCommand.SUSPEND.name());
+            }
+        }
+            
         // 
         long startTime = System.currentTimeMillis();
         nextIntervalTime += startTime;
@@ -1207,16 +1234,19 @@ public class BenchmarkController {
             long sleep = nextIntervalTime - nowTime;
             try {
                 if (this.stop == false && sleep > 0) {
-                    if (debug.val) LOG.debug(String.format("Sleeping for %.1f sec [pollIndex=%d]",
+                    if (debug.val) 
+                        LOG.debug(String.format("Sleeping for %.1f sec [pollIndex=%d]",
                                                sleep / 1000d, m_pollIndex));
                     Thread.sleep(sleep);
                 }
             } catch (InterruptedException e) {
                 // Ignore...
-                if (debug.val) LOG.debug(String.format("Interrupted! [pollIndex=%d / stop=%s]",
+                if (debug.val)
+                    LOG.debug(String.format("Interrupted! [pollIndex=%d / stop=%s]",
                                            m_pollIndex, this.stop));
             } finally {
-                if (debug.val) LOG.debug(String.format("Awake! [pollIndex=%d / stop=%s]",
+                if (debug.val) 
+                    LOG.debug(String.format("Awake! [pollIndex=%d / stop=%s]",
                                            m_pollIndex, this.stop));
             }
             nowTime = System.currentTimeMillis();
@@ -1232,6 +1262,21 @@ public class BenchmarkController {
 
                 // get ready for the next interval
                 nextIntervalTime = hstore_conf.client.interval * (m_pollIndex + 1) + startTime;
+            }
+
+
+            // Resume the transaction generation of clients after the warmup eviction of anti-cache
+            if (hstore_conf.site.anticache_warmup_eviction_enable && hstore_conf.site.anticache_warmup_eviction_time > 0) {
+                if (nowTime >= startTime + hstore_conf.site.anticache_warmup_eviction_time - 500) {
+                    LOG.info("Finish eviction. Resume benchmark execution.");
+                    hstore_conf.site.anticache_warmup_eviction_enable = false;
+                    for (String clientName : m_clients) {
+                        if (debug.val)
+                            LOG.debug(String.format("Sending %s to %s", ControlCommand.START, clientName)); 
+                        clientPSM.writeToProcess(clientName, ControlCommand.RESUME.name());
+                        clientPSM.writeToProcess(clientName, ControlCommand.CLEAR.name());
+                    } // FOR
+                }
             }
         } // WHILE
         

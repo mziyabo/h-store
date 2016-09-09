@@ -51,6 +51,7 @@ import org.voltdb.AriesLogNative;
 import org.voltdb.CatalogContext;
 import org.voltdb.ClientResponseImpl;
 import org.voltdb.MemoryStats;
+import org.voltdb.AntiCacheMemoryStats;
 import org.voltdb.ParameterSet;
 import org.voltdb.ProcedureProfiler;
 import org.voltdb.StatsAgent;
@@ -122,6 +123,7 @@ import edu.brown.hstore.txns.LocalTransaction;
 import edu.brown.hstore.txns.RemoteTransaction;
 import edu.brown.hstore.util.MapReduceHelperThread;
 import edu.brown.hstore.util.TransactionCounter;
+import edu.brown.hstore.util.TransactionProfilerDumper;
 import edu.brown.interfaces.Configurable;
 import edu.brown.interfaces.DebugContext;
 import edu.brown.interfaces.Shutdownable;
@@ -254,6 +256,7 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
     private final StatsAgent statsAgent = new StatsAgent();
     private TransactionProfilerStats txnProfilerStats;
     private MemoryStats memoryStats;
+    private AntiCacheMemoryStats anticacheMemoryStats;
     
     // ----------------------------------------------------------------------------
     // NETWORKING STUFF
@@ -418,6 +421,11 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
      * Profiler
      */
     private HStoreSiteProfiler profiler = new HStoreSiteProfiler();
+
+    /**
+     * Transaction Profiler Dumper!
+     */
+    private TransactionProfilerDumper txn_profiler_dumper;
     
     // ----------------------------------------------------------------------------
     // CACHED STRINGS
@@ -762,6 +770,16 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
         
         this.initPeriodicWorks();
         
+        // Transaction Profile CSV Dumper
+        if (hstore_conf.site.txn_profiling && hstore_conf.site.txn_profiling_dump) {
+            File csvFile = new File(hstore_conf.global.log_dir +
+                                    File.separator +
+                                    this.getSiteName().toLowerCase() +
+                                    "-profiler.csv");
+            this.txn_profiler_dumper = new TransactionProfilerDumper(csvFile);
+            LOG.info(String.format("Transaction profile data will be written to '%s'", csvFile));
+        }
+        
         // Add in our shutdown hook
         // Runtime.getRuntime().addShutdownHook(new Thread(new ShutdownHook()));
         
@@ -852,6 +870,10 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
         this.memoryStats = new MemoryStats();
         this.statsAgent.registerStatsSource(SysProcSelector.MEMORY, 0, this.memoryStats);
         
+        // ANTICACHE MEMORY
+        this.anticacheMemoryStats = new AntiCacheMemoryStats();
+        this.statsAgent.registerStatsSource(SysProcSelector.MULTITIER_ANTICACHE, 0, this.anticacheMemoryStats);
+
         // TXN COUNTERS
         statsSource = new TransactionCounterStats(this.catalogContext);
         this.statsAgent.registerStatsSource(SysProcSelector.TXNCOUNTER, 0, statsSource);
@@ -916,6 +938,7 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
     /**
      * Thread that is periodically executed to take snapshots
      */
+    @SuppressWarnings("unused")
     private final ExceptionHandlingRunnable snapshotter = new ExceptionHandlingRunnable() {
         @Override
         public void runImpl() {
@@ -1364,6 +1387,10 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
         return (this.memoryStats);
     }
     
+    public AntiCacheMemoryStats getAntiCacheMemoryStatsSource() {
+        return (this.anticacheMemoryStats);
+    }
+
     public Collection<TransactionPreProcessor> getTransactionPreProcessors() {
         return (this.preProcessors);
     }
@@ -1585,7 +1612,6 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
             try {
                 Thread.sleep(100);
             } catch (InterruptedException e) {
-                // TODO Auto-generated catch block
                 e.printStackTrace();
             }
         }
@@ -1761,6 +1787,14 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
         } // FOR
         if (this.hstore_coordinator != null) {
             this.hstore_coordinator.shutdown();
+        }
+        
+        if (this.txn_profiler_dumper != null) {
+            try {
+                this.txn_profiler_dumper.close();
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
         }
         
         if (this.voltNetwork != null) {
@@ -2184,7 +2218,6 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
             }
             // We will want to delete this transaction after we reject it if it is a single-partition txn
             // Otherwise we will let the normal distributed transaction process clean things up
-            LOG.info("the reject happened here!!!");
             this.transactionReject(ts, status);
             if (singlePartitioned) this.queueDeleteTransaction(ts.getTransactionId(), status);
         }        
@@ -2669,7 +2702,7 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
             }
             
             EvictedTupleAccessException error = (EvictedTupleAccessException)orig_error;
-            short block_ids[] = error.getBlockIds();
+            int block_ids[] = error.getBlockIds();
             int tuple_offsets[] = error.getTupleOffsets();
 
             Table evicted_table = error.getTable(this.catalogContext.database);
@@ -2736,7 +2769,7 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
             "The client handle for " + ts + " was not set properly";
         assert(status != Status.ABORT_MISPREDICT && status != Status.ABORT_EVICTEDACCESS) :
             "Trying to send back a client response for " + ts + " but the status is " + status;
-        
+
         if (hstore_conf.site.txn_profiling && ts.profiler != null) ts.profiler.startPostClient();
         boolean sendResponse = true;
         
@@ -3063,30 +3096,40 @@ public class HStoreSite implements VoltProcedureListener.Handler, Shutdownable, 
             }
         }
         
+        if (hstore_conf.site.txn_profiling && hstore_conf.site.txn_profiling_dump &&
+            this.txn_profiler_dumper != null && ts.profiler != null) { //  && ts.profiler.isDisabled() == false) {
+            this.txn_profiler_dumper.writeRow(ts);
+        }
+        
         // Update additional transaction profiling counters
         if (hstore_conf.site.txn_counters) {
             // Speculative Execution Counters
             if (ts.isSpeculative() && status != Status.ABORT_SPECULATIVE) {
                 TransactionCounter.SPECULATIVE.inc(catalog_proc);
                 switch (ts.getSpeculationType()) {
-                    case IDLE:
-                        TransactionCounter.SPECULATIVE_IDLE.inc(catalog_proc);
+                    case SP1_IDLE:
+                        TransactionCounter.SPECULATIVE_SP1_IDLE.inc(catalog_proc);
                         break;
                     case SP1_LOCAL:
-                        TransactionCounter.SPECULATIVE_SP1.inc(catalog_proc);
+                        TransactionCounter.SPECULATIVE_SP1_LOCAL.inc(catalog_proc);
                         break;
-                    case SP2_REMOTE_BEFORE:
-                        TransactionCounter.SPECULATIVE_SP2_BEFORE.inc(catalog_proc);
+                    case SP2_LOCAL:
+                        TransactionCounter.SPECULATIVE_SP2.inc(catalog_proc);
                         break;
-                    case SP2_REMOTE_AFTER:
-                        TransactionCounter.SPECULATIVE_SP2_AFTER.inc(catalog_proc);
+                    case SP3_REMOTE_BEFORE:
+                        TransactionCounter.SPECULATIVE_SP3_BEFORE.inc(catalog_proc);
                         break;
-                    case SP3_LOCAL:
-                        TransactionCounter.SPECULATIVE_SP3_LOCAL.inc(catalog_proc);
+                    case SP3_REMOTE_AFTER:
+                        TransactionCounter.SPECULATIVE_SP3_AFTER.inc(catalog_proc);
                         break;
-                    case SP3_REMOTE:
-                        TransactionCounter.SPECULATIVE_SP3_REMOTE.inc(catalog_proc);
+                    case SP4_LOCAL:
+                        TransactionCounter.SPECULATIVE_SP4_LOCAL.inc(catalog_proc);
                         break;
+                    case SP4_REMOTE:
+                        TransactionCounter.SPECULATIVE_SP4_REMOTE.inc(catalog_proc);
+                        break;
+                    default:
+                        throw new RuntimeException("Unexpected " + ts.getSpeculationType());
                 } // SWITCH
             }
             

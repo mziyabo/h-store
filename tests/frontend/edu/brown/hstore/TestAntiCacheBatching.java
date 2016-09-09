@@ -123,11 +123,11 @@ public class TestAntiCacheBatching extends BaseTestCase {
             row[0] = i;
             vt.addRow(row);
             Object childRow[] = VoltTableUtil.getRandomRow(child_tbl); // 1 comment per article
-            childRow[0] = i; // c_id
+            childRow[0] = 0; // c_id
             childRow[1] = i; // c_a_id
             childTable.addRow(childRow);
             childRow = VoltTableUtil.getRandomRow(child_tbl); // 1 comment per article
-            childRow[0] = i; // c_id
+            childRow[0] = 1; // c_id
             childRow[1] = i; // c_a_id
             childTable.addRow(childRow);
 
@@ -156,7 +156,7 @@ public class TestAntiCacheBatching extends BaseTestCase {
 
         // Now force the EE to evict our boys out
         // We'll tell it to remove 1MB, which is guaranteed to include all of our tuples
-        VoltTable evictResult = this.ee.antiCacheEvictBlockInBatch(catalog_tbl, child_tbl, 1024 * 500, 1);
+        VoltTable evictResult = this.ee.antiCacheEvictBlockInBatch(catalog_tbl, child_tbl, 1024 * 250, 1);
 
         System.err.println("-------------------------------");
         System.err.println(VoltTableUtil.format(evictResult));

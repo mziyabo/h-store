@@ -63,6 +63,7 @@
 #include "common/TheHashinator.h"
 #include "common/DummyUndoQuantum.hpp"
 #include "common/tabletuple.h"
+#include "common/types.h"
 #include "common/executorcontext.hpp"
 #include "common/FatalException.hpp"
 #include "common/RecoveryProtoMessage.h"
@@ -99,6 +100,7 @@
 #include "storage/TableCatalogDelegate.hpp"
 #include "org_voltdb_jni_ExecutionEngine.h" // to use static values
 #include "stats/StatsAgent.h"
+#include "stats/StatsSource.h"
 #include "voltdbipc.h"
 #include "common/FailureInjection.h"
 
@@ -106,6 +108,8 @@
 #include "logging/Logrecord.h"
 #include "logging/AriesLogProxy.h"
 #include <string>
+#include <map>
+#include <set>
 
 #define BUFFER_SIZE         1024*1024*300    // 100 MB buffer for reading in log file
 
@@ -337,11 +341,33 @@ int VoltDBEngine::executeQuery(int64_t planfragmentId,
     // number of tuples that we modified
     bool send_tuple_count = false;
 
+    size_t ttl = execsForFrag->list.size();
+
+#ifdef ANTICACHE
+#ifdef ANTICACHE_COUNTER
+    // MA: Set the default value of m_update_access. If we have update/delete operation,
+    // then we need to bring back the tuple to memory anyway if it's evicted.
+    if (m_executorContext->getAntiCacheEvictionManager() != NULL) {
+        m_executorContext->getAntiCacheEvictionManager()->m_update_access = 
+            false;
+
+        for (int ctr = 0; ctr < ttl; ++ctr) {
+            AbstractExecutor *executor = execsForFrag->list[ctr];
+            PlanNodeType nodeType = executor->getPlanNode()->getPlanNodeType();
+            VOLT_TRACE("nodeType: %d\n", nodeType);
+            if (nodeType == PLAN_NODE_TYPE_UPDATE || nodeType == PLAN_NODE_TYPE_DELETE)
+                m_executorContext->getAntiCacheEvictionManager()->m_update_access = 
+                true;
+        }
+    }
+
+#endif
+#endif
+
     // Walk through the queue and execute each plannode.  The query
     // planner guarantees that for a given plannode, all of its
     // children are positioned before it in this list, therefore
     // dependency tracking is not needed here.
-    size_t ttl = execsForFrag->list.size();
     for (int ctr = 0; ctr < ttl; ++ctr) {
         AbstractExecutor *executor = execsForFrag->list[ctr];
         assert(executor);
@@ -354,17 +380,21 @@ int VoltDBEngine::executeQuery(int64_t planfragmentId,
         // send back the number of tuples modified
         if (executor->forceTupleCount()) {
             send_tuple_count = true;
-            VOLT_DEBUG(
+            VOLT_TRACE(
                     "[PlanFragment %jd] Forcing tuple count at PlanNode #%02d for txn #%jd [OutputDep=%d]",
                     (intmax_t)planfragmentId,
                     executor->getPlanNode()->getPlanNodeId(), (intmax_t)txnId,
                     m_currentOutputDepId);
         } else {
-            VOLT_DEBUG(
-                    "[PlanFragment %jd] Executing PlanNode #%02d for txn #%jd [OutputDep=%d]",
+            VOLT_TRACE(
+                    "[PlanFragment %jd] Executing PlanNode #%02d (type %d)for txn #%jd [OutputDep=%d]",
                     (intmax_t)planfragmentId,
-                    executor->getPlanNode()->getPlanNodeId(), (intmax_t)txnId,
+                    executor->getPlanNode()->getPlanNodeId(),
+                    executor->getPlanNode()->getPlanNodeType(),
+                    (intmax_t)txnId,
                     m_currentOutputDepId);
+            //if (m_executorContext->getAntiCacheEvictionManager() != NULL)
+            //    printf("update: %d\n", m_executorContext->getAntiCacheEvictionManager()->m_update_access);
             try {
                 // Now call the execute method to actually perform whatever action
                 // it is that the node is supposed to do...
@@ -432,7 +462,7 @@ int VoltDBEngine::executeQuery(int64_t planfragmentId,
     m_currentOutputDepId = -1;
     m_currentInputDepId = -1;
 
-    VOLT_DEBUG("Finished executing.");
+    VOLT_TRACE("Finished executing.");
     return ENGINE_ERRORCODE_SUCCESS;
 }
 
@@ -500,7 +530,7 @@ int VoltDBEngine::executePlanFragment(string fragmentString,
 // RESULT FUNCTIONS
 // -------------------------------------------------
 bool VoltDBEngine::send(Table* dependency) {
-    VOLT_DEBUG("Sending Dependency '%d' from C++", m_currentOutputDepId);
+    VOLT_TRACE("Sending Dependency '%d' from C++", m_currentOutputDepId);
     m_resultOutput.writeInt(m_currentOutputDepId);
     if (!dependency->serializeTo(m_resultOutput))
         return false;
@@ -819,12 +849,38 @@ bool VoltDBEngine::rebuildTableCollections() {
 
             // add all of the indexes to the stats source
             std::vector<TableIndex*> tindexes = tcd->getTable()->allIndexes();
+            CatalogId tableId = static_cast<CatalogId>(catTable->relativeIndex());
             for (int i = 0; i < tindexes.size(); i++) {
                 TableIndex *index = tindexes[i];
+                // Pay attention here because this is important!
+                // Because the relative indexes for the catalog objects are based on
+                // their parent object, that means that we can't use the indexes' relativeIndex
+                // field to uniquely identify them because they are overwritten for 
+                // each table. So this means that we have to generate a composite
+                // key of the table's relativeIndex + index's relativeIndex so that can
+                // uniquely identify them. The Java layer doesn't need to know
+                // about this hot mess!
+                CatalogId indexId = computeIndexStatsId(tableId, static_cast<CatalogId>(i+1));
+                VOLT_DEBUG("CREATE IndexStats: %s.%s -> %d\n",
+                           tcd->getTable()->name().c_str(), index->getName().c_str(), indexId);
                 getStatsManager().registerStatsSource(
                         STATISTICS_SELECTOR_TYPE_INDEX,
-                        catTable->relativeIndex(), index->getIndexStats());
+                        indexId, index->getIndexStats());
             }
+
+            #ifdef ANTICACHE
+            // Add all different levels of anticacheDB to the stats source.
+            // This is duplicated, but that's fine for now (in case we need to get per-tire-table anticache stats).
+            if (m_executorContext->getAntiCacheEvictionManager() != NULL) {
+                std::vector <AntiCacheDB*> tacdbs = tcd->getTable()->allACDBs();
+                for (int i = 0; i < tacdbs.size(); i++) {
+                    VOLT_DEBUG("CREATE ACDBStats: %d\n", i);
+                    getStatsManager().registerStatsSource(
+                            STATISTICS_SELECTOR_TYPE_MULTITIER_ANTICACHE,
+                            static_cast<CatalogId>(i), (StatsSource*)(tacdbs[i]->getACDBStats()));
+                }
+            }
+            #endif
         }
         cdIt++;
     }
@@ -932,6 +988,7 @@ bool VoltDBEngine::initPlanFragment(const int64_t fragId,
             new ExecutorVector());
     ev->tempTableMemoryInBytes = 0;
 
+
     // Initialize each node!
     for (int ctr = 0, cnt = (int) pnf->getExecuteList().size(); ctr < cnt;
             ctr++) {
@@ -959,6 +1016,7 @@ bool VoltDBEngine::initPlanNode(const int64_t fragId, AbstractPlanNode* node,
         int* tempTableMemoryInBytes) {
     assert(node);
     assert(node->getExecutor() == NULL);
+
 
     // Executor is created here. An executor is *devoted* to this plannode
     // so that it can cache anything for the plannode
@@ -1193,16 +1251,18 @@ int VoltDBEngine::getStats(int selector, int locators[], int numLocators,
         bool interval, int64_t now) {
     Table *resultTable = NULL;
     vector<CatalogId> locatorIds;
-
-    for (int ii = 0; ii < numLocators; ii++) {
-        CatalogId locator = static_cast<CatalogId>(locators[ii]);
-        locatorIds.push_back(locator);
-    }
     size_t lengthPosition = m_resultOutput.reserveBytes(sizeof(int32_t));
 
     try {
         switch (selector) {
-        case STATISTICS_SELECTOR_TYPE_TABLE:
+        // -------------------------------------------------
+        // TABLE STATS
+        // -------------------------------------------------
+        case STATISTICS_SELECTOR_TYPE_TABLE: {
+            for (int ii = 0; ii < numLocators; ii++) {
+                CatalogId locator = static_cast<CatalogId>(locators[ii]);
+                locatorIds.push_back(locator);
+            }
             for (int ii = 0; ii < numLocators; ii++) {
                 CatalogId locator = static_cast<CatalogId>(locators[ii]);
                 if (m_tables.find(locator) == m_tables.end()) {
@@ -1220,7 +1280,58 @@ int VoltDBEngine::getStats(int selector, int locators[], int numLocators,
                     (StatisticsSelectorType) selector, locatorIds, interval,
                     now);
             break;
-        case STATISTICS_SELECTOR_TYPE_INDEX:
+        }
+        // -------------------------------------------------
+        // INDEX STATS
+        // -------------------------------------------------
+        case STATISTICS_SELECTOR_TYPE_INDEX: {
+            // HACK: Pavlo 2014-11-20
+            // Ok here's what's going to happen in this mofo.
+            // We normally don't have globally unique index ids, since we're using the
+            // the relative indexes. So we'll create a composite key of the table's relativeIndex +
+            // the index's relativeIndex
+            for (int ii = 0; ii < numLocators; ii++) {
+                CatalogId tableId = static_cast<CatalogId>(locators[ii]);
+                if (m_tables.find(tableId) == m_tables.end()) {
+                    char message[256];
+                    snprintf(message, 256,
+                            "getStats() called with selector %d, and"
+                                    " an invalid locator %d that does not correspond to"
+                                    " a table", selector, tableId);
+                    throw SerializableEEException(
+                            VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, message);
+                }
+                
+                // Create the composite keys for this table
+                catalog::Table *catTable = m_database->tables().get(m_tables[tableId]->name());
+                
+                map<string, catalog::Index*>::const_iterator idx_iterator;
+                for (idx_iterator = catTable->indexes().begin();
+                        idx_iterator != catTable->indexes().end(); idx_iterator++) {
+                    catalog::Index *catIndex = idx_iterator->second;
+                    CatalogId indexId = computeIndexStatsId(catTable->relativeIndex(), catIndex->relativeIndex());
+                    locatorIds.push_back(indexId);
+                    VOLT_DEBUG("FETCH IndexStats: %s.%s -> %d\n",
+                               catTable->name().c_str(), catIndex->name().c_str(), indexId);
+                } // FOR
+            } // FOR
+
+            resultTable = m_statsManager.getStats(
+                    (StatisticsSelectorType) selector, locatorIds, interval,
+                    now);
+            break;
+        }
+        // -------------------------------------------------
+        // MULTITIER STATS
+        // -------------------------------------------------
+        case STATISTICS_SELECTOR_TYPE_MULTITIER_ANTICACHE: {
+            VOLT_TRACE("Getting acdbstats!\n");
+            for (int ii = 0; ii < numLocators; ii++) {
+                CatalogId locator = static_cast<CatalogId>(locators[ii]);
+                locatorIds.push_back(locator);
+                VOLT_TRACE("Fetching acdbstats: %d\n", locator);
+            }
+            /*
             for (int ii = 0; ii < numLocators; ii++) {
                 CatalogId locator = static_cast<CatalogId>(locators[ii]);
                 if (m_tables.find(locator) == m_tables.end()) {
@@ -1232,12 +1343,47 @@ int VoltDBEngine::getStats(int selector, int locators[], int numLocators,
                     throw SerializableEEException(
                             VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, message);
                 }
-            }
+            }*/
+#ifdef ANTICACHE_COUNTER
+            AntiCacheEvictionManager* eviction_manager = m_executorContext->getAntiCacheEvictionManager();
+            if (eviction_manager != NULL) {
+                VOLT_INFO("We have reset the sketch counter of size %ld :)", sizeof(eviction_manager->m_sketch));
+                /*
+                int sum = 0;
+                for (int i = 0; i < SKETCH_WIDTH; ++i)
+                    sum += eviction_manager->m_sketch[0][i];
+                printf("cardinality: %d\n", sum);
+                */
 
+                int tot = 0;
+                int i = 0;
+                unsigned char* sketch = eviction_manager->m_sketch[0];
+                while (tot < SKETCH_SAMPLE_SIZE) {
+                    if (sketch[i]) {
+                        eviction_manager->m_sample[tot] = sketch[i];
+                        tot++;
+                    }
+                    i++;
+                }
+                std::sort(eviction_manager->m_sample.begin(), eviction_manager->m_sample.end(), std::greater <unsigned int>());
+                if (SKETCH_THRESH == 0)
+                    eviction_manager->m_sketch_thresh = 255;
+                else if (SKETCH_THRESH == SKETCH_SAMPLE_SIZE)
+                    eviction_manager->m_sketch_thresh = 0;
+                else
+                    eviction_manager->m_sketch_thresh = (unsigned char)((eviction_manager->m_sketch_thresh + eviction_manager->m_sample[SKETCH_THRESH]
+                                + 1) >> 1);
+                VOLT_INFO("Current sketch thresh: %d\n", eviction_manager->m_sketch_thresh);
+
+                memset(eviction_manager->m_sketch, 0, sizeof(eviction_manager->m_sketch));
+            }
+#endif
             resultTable = m_statsManager.getStats(
                     (StatisticsSelectorType) selector, locatorIds, interval,
                     now);
             break;
+        }
+
         default:
             char message[256];
             snprintf(message, 256,
@@ -1934,14 +2080,21 @@ int VoltDBEngine::trackingTupleSet(int64_t txnId, bool writes) {
 // -------------------------------------------------
 
 #ifdef ANTICACHE
-void VoltDBEngine::antiCacheInitialize(std::string dbDir, long blockSize) const {
-    VOLT_INFO("Enabling Anti-Cache at Partition %d: dir=%s / blockSize=%ld",
-            m_partitionId, dbDir.c_str(), blockSize);
-    m_executorContext->enableAntiCache(this, dbDir, blockSize);
+void VoltDBEngine::antiCacheInitialize(std::string dbDir, AntiCacheDBType dbType, bool blocking, long blockSize, long maxSize, bool blockMerge) const {
+    VOLT_INFO("Enabling type %d (blocking: %d/blockMerge: %d) Anti-Cache at Partition %d: dir=%s / blockSize=%ld max=%ld", 
+            (int)dbType, (int)blocking, (int)blockMerge, m_partitionId, dbDir.c_str(), blockSize, maxSize);
+    m_executorContext->enableAntiCache(this, dbDir, blockSize, dbType, blocking, maxSize, blockMerge);
 }
 
-int VoltDBEngine::antiCacheReadBlocks(int32_t tableId, int numBlocks, int16_t blockIds[], int32_t tupleOffsets[]) {
+void VoltDBEngine::antiCacheAddDB(std::string dbDir, AntiCacheDBType dbType, bool blocking, long blockSize, long maxSize, bool blockMerge) const {
+    VOLT_INFO("Adding type %d (blocking: %d/blockMerge: %d) Anti-Cache at Partition %d: dir=%s / blockSize=%ld max=%ld", 
+            (int)dbType, (int)blocking, (int)blockMerge, m_partitionId, dbDir.c_str(), blockSize, maxSize);
+    m_executorContext->addAntiCacheDB(dbDir, blockSize, dbType, blocking, maxSize, blockMerge);
+}
+
+int VoltDBEngine::antiCacheReadBlocks(int32_t tableId, int numBlocks, int32_t blockIds[], int32_t tupleOffsets[]) {
     int retval = ENGINE_ERRORCODE_SUCCESS;
+
 
     // Grab the PersistentTable referenced by the given tableId
     // This is simply the relativeIndex of the table in the catalog
@@ -1950,6 +2103,7 @@ int VoltDBEngine::antiCacheReadBlocks(int32_t tableId, int numBlocks, int16_t bl
     if (table == NULL) {
         throwFatalException("Invalid table id %d", tableId);
     }
+    VOLT_DEBUG("Read from table: %d %s", tableId, (table->name()).c_str());
 
     #ifdef VOLT_INFO_ENABLED
     std::ostringstream buffer;
@@ -1959,13 +2113,30 @@ int VoltDBEngine::antiCacheReadBlocks(int32_t tableId, int numBlocks, int16_t bl
     }
     VOLT_INFO("Preparing to read %d evicted blocks: [%s]", numBlocks, buffer.str().c_str());
     #endif
+    VOLT_DEBUG("Preparing to read %d evicted blocks asynchronously: [%s]", numBlocks, (table->name()).c_str());
     
     // We can now ask it directly to read in the evicted blocks that they want
     bool finalResult = true;
     AntiCacheEvictionManager* eviction_manager = m_executorContext->getAntiCacheEvictionManager();
+    //std::map <int32_t, set <int32_t> > filter;
     try {
         for (int i = 0; i < numBlocks; i++) {
+            VOLT_TRACE("inengine: %d", i);
+            /*
+            if (filter.find(blockIds[i]) != filter.end())
+                if (filter[blockIds[i]].find(tupleOffsets[i]) != filter[blockIds[i]].end()) {
+                    VOLT_WARN("skipping %d %d", blockIds[i], tupleOffsets[i]);
+                    continue;
+                }
+
+            (filter[blockIds[i]]).insert(tupleOffsets[i]);
+            */
+            VOLT_DEBUG("reading %d %d", blockIds[i], tupleOffsets[i]);
+            //pthread_mutex_lock(&(eviction_manager->lock));
+            //eviction_manager->prio_lock_low(&eviction_manager->prio_lock);
             finalResult = eviction_manager->readEvictedBlock(table, blockIds[i], tupleOffsets[i]) && finalResult;
+            //eviction_manager->prio_unlock_low(&eviction_manager->prio_lock);
+            //pthread_mutex_unlock(&(eviction_manager->lock));
         } // FOR
 
     } catch (SerializableEEException &e) {
@@ -1973,11 +2144,14 @@ int VoltDBEngine::antiCacheReadBlocks(int32_t tableId, int numBlocks, int16_t bl
                    numBlocks, table->name().c_str(), e.message().c_str());
         // FIXME: This won't work if we execute are executing this operation the
         //        same time that txns are running
+        
+        // MJG DANGER!!!!
         resetReusedResultOutputBuffer();
         e.serialize(getExceptionOutputSerializer());
         retval = ENGINE_ERRORCODE_ERROR;
     }
 
+    VOLT_DEBUG("Read from finished table: %d %s", tableId, (table->name()).c_str());
     return (retval);
 }
 
@@ -1993,10 +2167,11 @@ int VoltDBEngine::antiCacheEvictBlock(int32_t tableId, long blockSize, int numBl
         throwFatalException("Invalid table id %d", tableId);
     }
 
-    VOLT_DEBUG("Attempting to evict a block of %ld bytes from table '%s'",
+    VOLT_INFO("Attempting to evict a block of %ld bytes from table '%s'",
             blockSize, table->name().c_str());
     size_t lengthPosition = m_resultOutput.reserveBytes(sizeof(int32_t));
     Table *resultTable = m_executorContext->getAntiCacheEvictionManager()->evictBlock(table, blockSize, numBlocks);
+    VOLT_DEBUG("Write finish!");
     if (resultTable != NULL) {
         resultTable->serializeTo(m_resultOutput);
         m_resultOutput.writeIntAt(lengthPosition,
@@ -2049,10 +2224,15 @@ int VoltDBEngine::antiCacheMergeBlocks(int32_t tableId) {
         throwFatalException("Invalid table id %d", tableId);
     }
 
-    VOLT_DEBUG("Merging unevicted blocks for table %d", tableId);
+    //VOLT_ERROR("Merging unevicted blocks for table %d", tableId);
     // Merge all the newly unevicted blocks back into our regular table data
     try {
-        m_executorContext->getAntiCacheEvictionManager()->mergeUnevictedTuples(table);
+        AntiCacheEvictionManager* eviction_manager = m_executorContext->getAntiCacheEvictionManager();
+        //pthread_mutex_lock(&(eviction_manager->lock));
+        //eviction_manager->prio_lock_high(&eviction_manager->prio_lock);
+        eviction_manager->mergeUnevictedTuples(table);
+        //eviction_manager->prio_unlock_high(&eviction_manager->prio_lock);
+        //pthread_mutex_unlock(&(eviction_manager->lock));
     } catch (SerializableEEException &e) {
         VOLT_INFO("Failed to merge blocks for table %d", tableId);
 
@@ -2062,6 +2242,7 @@ int VoltDBEngine::antiCacheMergeBlocks(int32_t tableId) {
         e.serialize(getExceptionOutputSerializer());
         retval = ENGINE_ERRORCODE_ERROR;
     }
+    //VOLT_ERROR("Quit merge uneviction for table %d", tableId);
 
     return (retval);
 }
@@ -2075,8 +2256,8 @@ void VoltDBEngine::antiCacheResetEvictedTupleTracker() {
 }
 
 #else
-void VoltDBEngine::antiCacheInitialize(std::string dbDir,
-        long blockSize) const {
+void VoltDBEngine::antiCacheInitialize(std::string dbDir, AntiCacheDBType dbType,
+        long blockSize, long maxSize) const {
     // FIX :: Dummy call if ANTICACHE is not defined
     //VOLT_ERROR("Anti-Cache feature was not enable when compiling the EE");
 }

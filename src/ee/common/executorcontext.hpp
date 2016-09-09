@@ -24,8 +24,13 @@
 
 #ifdef ANTICACHE
 #include "anticache/AntiCacheDB.h"
+#include "anticache/BerkeleyAntiCacheDB.h"
+#include "anticache/NVMAntiCacheDB.h"
+#include "anticache/AllocatorNVMAntiCacheDB.h"
 #include "anticache/AntiCacheEvictionManager.h"
 #include "execution/VoltDBEngine.h"
+#define MAX_LEVELS 5
+
 #endif
 
 namespace voltdb {
@@ -58,8 +63,12 @@ namespace voltdb {
 
             #ifdef ANTICACHE
             if (m_antiCacheEnabled) {
-                delete m_antiCacheDB;
+                //delete[] m_antiCacheDB;
                 delete m_antiCacheEvictionManager;
+                int i;
+                for (i = 0; i < m_levels; i++) {
+                    delete m_antiCacheDB[i];
+                }
             }
             #endif
         }
@@ -76,6 +85,11 @@ namespace voltdb {
             m_trackingEnabled = false;
             m_MMAPEnabled = false;
             m_ARIESEnabled = false;
+            m_antiCacheDBs = 0;
+            #ifdef ANTICACHE
+            m_antiCacheEvictionManager = NULL;
+            #endif
+
         }
 
         // not always known at initial construction
@@ -110,6 +124,7 @@ namespace voltdb {
 
         inline std::string getDBDir() const {
             if (m_MMAPDir.empty())
+                //return "/mnt/pmfs/mmap_file";          // Default : "/tmp"
                 return "/tmp";          // Default : "/tmp"
             return (m_MMAPDir);
         }
@@ -191,8 +206,23 @@ namespace voltdb {
          * Return the handle to disk-based storage object that we
          * can use to read and write tuples to
          */
-        AntiCacheDB* getAntiCacheDB() const {
-            return m_antiCacheDB;
+        AntiCacheDB* getAntiCacheDB(int level) const {
+            return m_antiCacheDB[level];
+        }
+
+        /**
+         * Return the number of anticache levels the system is
+         * currently supporting.
+         */
+        inline int16_t getAntiCacheLevels() {
+            return m_levels;
+        }
+
+        /**
+         * This should only use for test purpose!!
+         */
+        inline void setAntiCacheLevels(int16_t levels) {
+            m_levels = levels;
         }
 
         /**
@@ -202,17 +232,70 @@ namespace voltdb {
         AntiCacheEvictionManager* getAntiCacheEvictionManager() const {
             return m_antiCacheEvictionManager;
         }
+        
+        /**
+         * Return the AntiCacheDBType associated with the given AntiCacheDB
+         */
+
+        AntiCacheDBType getAntiCacheDBType(int level) {
+            return m_dbType[level];
+        }
+
+        /**
+         * Return whether the system as a whole uses blockmerge or tuple merge.
+         *
+         * currently, this is the only version that works.
+         */
+        bool isBlockMerge() {
+            return m_blockMergeSystem;
+        }
+
+        /**
+         * Return whether the level chosen uses block merge or tuple merge.
+         *
+         * This is not fully implemented yet. Currently the system as a whole
+         * can be block or tuple merge.
+         */
+        bool isBlockMerge(int level) {
+            return m_blockMerge[level];
+        }
 
         /**
          * Enable the anti-caching feature in the EE.
          * The input parameter is the directory where our disk-based storage
          * will write out evicted blocks of tuples for this partition
          */
-        void enableAntiCache(const VoltDBEngine *engine, std::string &dbDir, long blockSize) {
+        void enableAntiCache(const VoltDBEngine *engine, std::string &dbDir, long blockSize, AntiCacheDBType dbType, bool blocking, long maxSize, bool blockMerge) {
             assert(m_antiCacheEnabled == false);
             m_antiCacheEnabled = true;
-            m_antiCacheDB = new AntiCacheDB(this, dbDir, blockSize);
+            m_levels = 0;
+            m_blockMergeSystem = blockMerge;
             m_antiCacheEvictionManager = new AntiCacheEvictionManager(engine);
+            addAntiCacheDB(dbDir, blockSize, dbType, blocking, maxSize, blockMerge);
+        }
+
+        void addAntiCacheDB(std::string &dbDir, long blockSize, AntiCacheDBType dbType, bool blocking, long maxSize, bool blockMerge) {
+            assert(m_antiCacheEnabled == true);
+            m_dbType[m_levels] = dbType;
+            // MJG: need a better error return (throw exception?) 
+            if (dbType == ANTICACHEDB_BERKELEY) {
+                m_antiCacheDB[m_levels] = new BerkeleyAntiCacheDB(this, dbDir, blockSize, maxSize);
+//              m_antiCacheEvictionManager->addAntiCacheDB(new BerkeleyAntiCacheDB(this, dbDir, blockSize, maxSize));
+            } else if (dbType == ANTICACHEDB_NVM) {
+                m_antiCacheDB[m_levels] = new NVMAntiCacheDB(this, dbDir, blockSize, maxSize);
+                //m_antiCacheEvictionManager->addAntiCacheDB(new NVMAntiCacheDB(this, dbDir, blockSize, maxSize));
+            } else if (dbType == ANTICACHEDB_ALLOCATORNVM) {
+                m_antiCacheDB[m_levels] = new AllocatorNVMAntiCacheDB(this, dbDir, blockSize, maxSize);
+                //m_antiCacheEvictionManager->addAntiCacheDB(new NVMAntiCacheDB(this, dbDir, blockSize, maxSize));
+            } else {
+                VOLT_ERROR("Invalid AntiCacheDBType: %d! Aborting...", (int)dbType);
+                assert(m_antiCacheEnabled == false);
+            }  
+            m_antiCacheDB[m_levels]->setBlocking(blocking);
+            m_antiCacheDB[m_levels]->setBlockMerge(blockMerge);
+            m_blockMerge[m_levels] = blockMerge;
+            m_antiCacheEvictionManager->addAntiCacheDB(m_antiCacheDB[m_levels]);
+            m_levels++;
         }
         #endif
 
@@ -288,8 +371,12 @@ namespace voltdb {
         int64_t m_txnId;
 
         #ifdef ANTICACHE
-        AntiCacheDB *m_antiCacheDB;
+        AntiCacheDB *m_antiCacheDB[MAX_LEVELS];
         AntiCacheEvictionManager *m_antiCacheEvictionManager;
+        AntiCacheDBType m_dbType[MAX_LEVELS];
+        int16_t m_levels;
+        bool m_blockMerge[MAX_LEVELS];
+        bool m_blockMergeSystem;
         #endif
 
         #ifdef STORAGE_MMAP
@@ -314,6 +401,7 @@ namespace voltdb {
         CatalogId m_hostId;
         bool m_exportEnabled;
         bool m_antiCacheEnabled;
+        int m_antiCacheDBs;
 
         std::string m_MMAPDir;
         bool m_MMAPEnabled;

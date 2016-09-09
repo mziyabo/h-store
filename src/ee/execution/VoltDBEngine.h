@@ -295,10 +295,12 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         // -------------------------------------------------
         // ANTI-CACHE FUNCTIONS
         // -------------------------------------------------
-        void antiCacheInitialize(std::string dbDir, long blockSize) const;
+        void antiCacheInitialize(std::string dbDir, AntiCacheDBType dbType, bool blocking, long blockSize, long maxSize, bool blockMerge) const;
 
         #ifdef ANTICACHE
-        int antiCacheReadBlocks(int32_t tableId, int numBlocks, int16_t blockIds[], int32_t tupleOffsets[]);
+        void antiCacheAddDB(std::string dbDir, AntiCacheDBType dbType, bool blocking, long blockSize, long maxSize, bool blockMerge) const;
+
+        int antiCacheReadBlocks(int32_t tableId, int numBlocks, int32_t blockIds[], int32_t tupleOffsets[]);
         int antiCacheEvictBlock(int32_t tableId, long blockSize, int numBlocks);
         int antiCacheEvictBlockInBatch(int32_t tableId, int32_t childTableId, long blockSize, int numBlocks);
         int antiCacheMergeBlocks(int32_t tableId);
@@ -502,6 +504,12 @@ class __attribute__((visibility("default"))) VoltDBEngine {
         bool updateCatalogDatabaseReference();
 
         void printReport();
+        
+        // HACK: PAVLO 2014-11-20
+        // This is needed so that we can fix index stats collection
+        inline CatalogId computeIndexStatsId(const CatalogId tableId, const CatalogId indexId) const {
+            return static_cast<CatalogId>(indexId | tableId<<16);
+        }
 
 
         /**

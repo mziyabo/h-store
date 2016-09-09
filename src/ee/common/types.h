@@ -314,7 +314,9 @@ enum TableStreamType {
 // ------------------------------------------------------------------
 enum StatisticsSelectorType {
     STATISTICS_SELECTOR_TYPE_TABLE,
-    STATISTICS_SELECTOR_TYPE_INDEX
+    STATISTICS_SELECTOR_TYPE_INDEX,
+    STATISTICS_SELECTOR_TYPE_MULTITIER_ANTICACHE = 20
+
 };
 
 // ------------------------------------------------------------------
@@ -342,6 +344,28 @@ enum RecoveryMsgType {
      * Generated when all recovery data for a table has been generated
      */
     RECOVERY_MSG_TYPE_COMPLETE = 4
+};
+
+// -----------------------------------------------------------------
+// AntiCacheDB Types
+// -----------------------------------------------------------------
+enum AntiCacheDBType {
+    /*
+     * No AntiCacheDB (primarily for second and third level DBs)
+     */
+    ANTICACHEDB_NONE = 0,
+    /*
+     * BerkeleyDB
+     */
+    ANTICACHEDB_BERKELEY = 1,
+    /*
+     * NVM file-based store
+     */
+    ANTICACHEDB_NVM = 2,
+    /*
+     * NVM allocator-based store
+     */
+    ANTICACHEDB_ALLOCATORNVM = 3
 };
 
 // ------------------------------------------------------------------

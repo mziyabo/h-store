@@ -5,6 +5,7 @@ files/
 *.trace
 *.trace.gz
 traces/
+*.swp
 *.jar
 *.jar-ORIG
 *.log
@@ -64,3 +65,8 @@ src/catgen/out
 .project
 .cproject
 .settings
+
+## -------------------------------
+## cscope files
+## -------------------------------
+cscope.*

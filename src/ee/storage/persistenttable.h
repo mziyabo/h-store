@@ -87,6 +87,7 @@ class RecoveryProtoMsg;
     
 #ifdef ANTICACHE
 class EvictedTable;
+class NVMEvictedTable;
 class AntiCacheEvictionManager; 
 class EvictionIterator;
 #endif
@@ -271,6 +272,8 @@ class PersistentTable : public Table {
     #ifdef ANTICACHE
     void setEvictedTable(voltdb::Table *evictedTable);
     voltdb::Table* getEvictedTable();
+    void setNVMEvictedTable(voltdb::Table *evictedTable);
+    voltdb::Table* getNVMEvictedTable();
     // needed for LRU chain eviction
     void setNewestTupleID(uint32_t id); 
     void setOldestTupleID(uint32_t id); 
@@ -278,10 +281,11 @@ class PersistentTable : public Table {
     uint32_t getOldestTupleID();
     void setNumTuplesInEvictionChain(int num_tuples);
     int getNumTuplesInEvictionChain(); 
-    AntiCacheDB* getAntiCacheDB();
-    std::map<int16_t, int16_t> getUnevictedBlockIDs();
+    AntiCacheDB* getAntiCacheDB(int level);
+    std::map<int32_t, int32_t> getUnevictedBlockIDs();
     std::vector<char*> getUnevictedBlocks();
     int32_t getMergeTupleOffset(int);
+    int32_t getBlockID(int);
     bool mergeStrategy();
     int32_t getTuplesEvicted();
     void setTuplesEvicted(int32_t tuplesEvicted);
@@ -296,24 +300,31 @@ class PersistentTable : public Table {
     int64_t getBytesWritten();
     void setBytesWritten(int64_t bytesWritten);
     voltdb::TableTuple * getTempTarget1();
-    void insertUnevictedBlockID(std::pair<int16_t,int16_t>);
-    void insertUnevictedBlock(char* unevicted_tuples);
-    void insertTupleOffset(int32_t tuple_offset);
-    bool isAlreadyUnEvicted(int16_t blockId);
+    void insertUnevictedBlockID(std::pair<int32_t,int32_t>);
+    bool removeUnevictedBlockID(int32_t blockId);
+    void insertUnevictedBlock(char* unevicted_tuples, int i);
+    void insertTupleOffset(int32_t tuple_offset, int i);
+    void insertBlockID(int32_t, int i);
+    int isAlreadyUnEvicted(int32_t blockId);
     int32_t getTuplesRead();
     void setTuplesRead(int32_t tuplesRead);
     void setBatchEvicted(bool batchEvicted);
     bool isBatchEvicted();
     void clearUnevictedBlocks();
     void clearMergeTupleOffsets();
-    int64_t unevictTuple(ReferenceSerializeInput * in, int j, int merge_tuple_offset);
-void clearUnevictedBlocks(int i);
+    int64_t unevictTuple(ReferenceSerializeInput * in, int j, int merge_tuple_offset, bool blockMerge);
+    void clearUnevictedBlocks(int i);
+    void clearUnevictedBlockIDs();
+    void clearBlockIDs();
     char* getUnevictedBlocks(int i);
     int unevictedBlocksSize();
+    std::vector<AntiCacheDB*> allACDBs() const;
 
     #endif
+
+    void updateStringMemory(int tupleStringMemorySize);
     
-    void setEntryToNewAddressForAllIndexes(const TableTuple *tuple, const void* address);
+    void setEntryToNewAddressForAllIndexes(const TableTuple *tuple, const void* address, const void* oldAddress);
 
 protected:
     virtual void allocateNextBlock();
@@ -374,11 +385,13 @@ protected:
     // ANTI-CACHE VARIABLES
     #ifdef ANTICACHE
     voltdb::Table *m_evictedTable;
+    voltdb::Table *m_NVMEvictedTable;
     
-    std::map<int16_t, int16_t> m_unevictedBlockIDs; 
+    std::map<int32_t, int32_t> m_unevictedBlockIDs; 
 //    std::vector<int16_t> m_unevictedBlockIDs;
     std::vector<char*> m_unevictedBlocks;
     std::vector<int32_t> m_mergeTupleOffset; 
+    std::vector<int32_t> m_blockIDs;
     
     std::map<int, int> m_unevictedTuplesPerBlocks; 
 
@@ -392,6 +405,9 @@ protected:
     
     bool m_blockMerge;
     bool m_batchEvicted;
+    
+    int m_read_pivot;
+    int m_merge_pivot;
 
     #endif
     
@@ -432,6 +448,10 @@ inline void PersistentTable::allocateNextBlock() {
 #endif
     char *memory = (char*)(new char[bytes]);
     m_data.push_back(memory);
+#ifdef ANTICACHE_TIMESTAMPS_PRIME
+    m_evictPosition.push_back(0);
+    m_stepPrime.push_back(-1);
+#endif
 #ifdef MEMCHECK_NOFREELIST
     assert(m_allocatedTuplePointers.insert(memory).second);
     m_deletedTuplePointers.erase(memory);

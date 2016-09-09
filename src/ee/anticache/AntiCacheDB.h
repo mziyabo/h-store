@@ -29,13 +29,17 @@
 #include <db_cxx.h>
 
 #include "common/debuglog.h"
+#include "common/types.h"
 #include "common/DefaultTupleSerializer.h"
+#include "anticache/UnknownBlockAccessException.h"
+#include "anticache/FullBackingStoreException.h"
 
+#include <deque>
 #include <map>
 #include <vector>
 
 
-#define ANTICACHE_DB_NAME "anticache.db"
+//#define ANTICACHE_DB_NAME "anticache.db"
 
 using namespace std;
 
@@ -43,6 +47,7 @@ namespace voltdb {
     
 class ExecutorContext;
 class AntiCacheDB;
+class AntiCacheStats;
 
 /**
  * Wrapper class for an evicted block that has been read back in 
@@ -52,10 +57,10 @@ class AntiCacheBlock {
     friend class AntiCacheDB;
     
     public:
-        ~AntiCacheBlock();
+        virtual ~AntiCacheBlock() {};
         
-        inline int16_t getBlockId() const {
-        	return m_blockId;
+        inline uint32_t getBlockId() const {
+            return m_blockId;
         }
 
         inline std::string getTableName() const {
@@ -63,187 +68,308 @@ class AntiCacheBlock {
         }
 
         inline long getSize() const {
-        	return m_size;
+            return m_size;
         }
         inline char* getData() const {
-	    return m_block;
+            return m_block;
         }
 
         struct payload{
-        	int16_t blockId;
-        	std::string tableName;
+            uint32_t blockId;
+            std::string tableName;
             char * data;
             long size;
         };
-    
-    private:
-        AntiCacheBlock(int16_t blockId, Dbt value);
-        AntiCacheBlock(int16_t blockId, char* block, long size);
-        int16_t m_blockId;
-        payload m_payload;
-	long m_size;
-	char * m_block;
-	char * m_buf;
 
+        inline AntiCacheDBType getBlockType() const {
+            return m_blockType;
+        }
+    
+    protected:
+        // Why is this private/protected?
+        AntiCacheBlock(uint32_t blockId);
+        uint32_t m_blockId;
+        payload m_payload;
+        int32_t m_size;
+        char * m_block;
+        char * m_buf;
+        // probably should be changed to a final/const
+        AntiCacheDBType m_blockType;
 }; // CLASS
 
-// Encapsulates a block that is flushed out to BerkeleyDB
-// TODO: merge it with AntiCacheBlock
-class BerkeleyDBBlock{
-public:
-	~BerkeleyDBBlock();
-
-    inline void initialize(long blockSize, std::vector<std::string> tableNames, int16_t blockId, int numTuplesEvicted){
-        DefaultTupleSerializer serializer;
-        // buffer used for serializing a single tuple
-        serialized_data = new char[blockSize];
-        out.initializeWithPosition(serialized_data, blockSize, 0);
-        out.writeInt((int)tableNames.size());
-        for (std::vector<std::string>::iterator it = tableNames.begin() ; it != tableNames.end(); ++it){
-			out.writeTextString(*it);
-			// note this offset since we need to write at this again later on
-			offsets.push_back(getSerializedSize());
-			out.writeInt(numTuplesEvicted);// reserve first 4 bytes in buffer for number of tuples in block
-        }
-
-
-    }
-
-    inline void addTuple(TableTuple tuple){
-    	// Now copy the raw bytes for this tuple into the serialized buffer
-        tuple.serializeWithHeaderTo(out);
-    }
-
-    inline void writeHeader(std::vector<int> num_tuples_evicted){
-    	// write out the block header (i.e. number of tuples in block)
-    	int count = 0;
-    	for (std::vector<int>::iterator it = num_tuples_evicted.begin() ; it != num_tuples_evicted.end(); ++it){
-        	out.writeIntAt(offsets.at(count), *it);
-        	count++;
-    	}
-    }
-
-    inline int getSerializedSize(){
-    	return (int)out.size();
-    }
-
-    inline const char* getSerializedData(){
-    	return out.data();
-    }
-private:
-    ReferenceSerializeOutput out;
-    char * serialized_data;
-    std::vector<int> offsets;
-
-};
-/**
- *
- */
 class AntiCacheDB {
         
     public: 
-        AntiCacheDB(ExecutorContext *ctx, std::string db_dir, long blockSize);
-        ~AntiCacheDB();
-
-		void initializeNVM(); 
-		
-		void initializeBerkeleyDB(); 
+       
+        AntiCacheDB(ExecutorContext *ctx, std::string db_dir, long blockSize, long maxSize);
+        virtual ~AntiCacheDB();
 
         /**
          * Write a block of serialized tuples out to the anti-cache database
          */
-        void writeBlock(const std::string tableName,
-                        int16_t blockId,
-                        const int tupleCount,
-                        const char* data,
-                        const long size);
+        virtual void writeBlock(const std::string tableName,
+                                uint32_t blockId,
+                                const int tupleCount,
+                                const char* data,
+                                const long size, const int evictedTupleCount) = 0;
         /**
          * Read a block and return its contents
          */
-        AntiCacheBlock readBlock(std::string tableName, int16_t blockId);
+        virtual AntiCacheBlock* readBlock(uint32_t blockId, bool isMigrate) = 0;
+
+        virtual bool validateBlock(uint32_t blockId) = 0;
 
 
         /**
          * Flush the buffered blocks to disk.
          */
-        void flushBlocks();
+        virtual void flushBlocks() = 0;
+        
+        virtual void setStatsSource();
 
         /**
          * Return the next BlockId to use in the anti-cache database
-         * This is guaranteed to be unique per partition
          */
-        inline int16_t nextBlockId() {
-            return (++m_nextBlockId);
+        virtual uint32_t nextBlockId() = 0;
+        /**
+         * Return the AntiCacheDBType of the database
+         */
+        inline AntiCacheDBType getDBType() {
+            return m_dbType;
+        }
+        /**
+         * Return the blockSize of stored blocks
+         */
+        inline long getBlockSize() {
+            return m_blockSize;
+        }
+        /**
+         * Return the number of blocks stored in the database
+         */
+        inline int getNumBlocks() {
+            return m_totalBlocks;
+        }
+        /**
+         * Return the maximum size of the database in bytes
+         */
+        inline int64_t getMaxDBSize() {
+            return m_maxDBSize;
+        }
+        /**
+         * Return the maximum number of blocks that can be stored 
+         * in the database.
+         */
+        inline int getMaxBlocks() {
+            return (int)(m_maxDBSize/m_blockSize);
+        }
+        /**
+         * Return the number of free (available) blocks
+         */
+        inline int getFreeBlocks() {
+            return getMaxBlocks()-getNumBlocks();
+        }
+        /**
+         * Return the LRU block from the database. This *removes* the block
+         * from the database. If you take it, it's yours, it exists nowhere else.
+         * If a migrate or merge fails, you have to write it back. 
+         *
+         * It also updates removes the blockId from the LRU deque.
+         */
+        AntiCacheBlock* getLRUBlock();       
+
+        /**
+         * Removes a blockId from the LRU queue. This is used when reading a
+         * specific block.
+         */
+        void removeBlockLRU(uint32_t blockId);
+        
+        /** 
+         * Adds a blockId to the LRU deque.
+         */
+        void pushBlockLRU(uint32_t blockId);
+
+        /**
+         * Pops and returns the LRU blockID from the deque. This isn't a 
+         * peek. When this function finishes, the block is in the database
+         * but the blockId is no longer in the LRU. This shouldn't necessarily
+         * be fatal, but it should be avoided.
+         */
+        inline uint32_t popBlockLRU();
+
+        /**
+         * Set the AntiCacheID number. This should be done on initialization and
+         * should also match the the level in VoltDBEngine/executorcontext
+         */
+        inline void setACID(int16_t ACID) {
+            m_ACID = ACID;
+        }
+
+        virtual inline AntiCacheStats* getACDBStats() {
+            return m_stats;
+        }
+
+        /**
+         * Change anticache memory stats for the removal of a single tuple.
+         * Because of the structure of AnticacheDB we have to have this another
+         * function.
+         */
+        inline void removeSingleTupleStats(uint32_t blockId, int64_t bytes) {
+            m_bytesUnevicted += bytes;
         }
         
-    private:
+        /**
+         * Return the AntiCacheID number.
+         */
+        inline int16_t getACID() {
+            return m_ACID;
+        }
+
+        /**
+         * return true if we block to fetch a block, false if we abort and issue a merge
+         */
+        inline bool isBlocking() {
+            return m_blocking;
+        }
         
         /**
-         * NVM constants
+         * Set whether we block or abort
          */
-        static const off_t NVM_FILE_SIZE = 1073741824/2; 
-        static const int NVM_BLOCK_SIZE = 524288 + 1000; 
-	static const int MMAP_PAGE_SIZE = 2 * 1024 * 1024; 
+        inline void setBlocking(bool blocking) {
+            m_blocking = blocking;
+        }
+
+        /*
+         * return current count of evicted blocks
+         */
+        inline int32_t getBlocksEvicted() {
+            return m_blocksEvicted;
+        }
         
+        /* 
+         * clear current count of evicted blocks
+         */
+        inline void clearBlocksEvicted() {
+            m_blocksEvicted = 0;
+        }
+        
+        /*
+         * return current count of evicted bytes
+         */
+
+        inline int64_t getBytesEvicted() {
+            return m_bytesEvicted;
+        }
+
+        /*
+         * clear current count of evicted bytes
+         */
+        inline void clearBytesEvicted() {
+            m_bytesEvicted = 0;
+        }
+        
+        /* 
+         * return current count of unevicted blocks
+         */
+        inline int32_t getBlocksUnevicted() {
+            return m_blocksUnevicted;
+        }
+
+        /*
+         * clear current count of unevicted blocks
+         */
+        inline void clearBlocksUnevicted() {
+            m_blocksUnevicted = 0;
+        }
+
+        /* 
+         * return current count of unevicted bytes
+         */
+        inline int64_t getBytesUnevicted() {
+            return m_bytesUnevicted;
+        }
+
+        /*
+         * clear current couont of unevicted bytes
+         */
+        inline void clearBytesUnevicted() {
+            m_bytesUnevicted = 0;
+        }
+        
+        /*
+         * Set to block merge
+         */
+        inline void setBlockMerge(bool block_merge) {
+            m_block_merge = block_merge;
+        }
+
+        /*
+         * Are we merging the entire block or just a single tuple?
+         */
+        inline bool isBlockMerge() {
+            return m_block_merge;
+        }
+
+        inline int32_t getEvictedBytesPerBlock(uint32_t blockId) {
+            return (int32_t)(m_bytesEvicted / (m_blocksEvicted - m_blocksUnevicted));
+        }
+
+        /*
+        inline int getTupleInBlock(uint32_t blockId) {
+            return tupleInBlock[blockId];
+        }
+        
+        inline int getEvictedTupleInBlock(uint32_t blockId) {
+            return evictedTupleInBlock[blockId];
+        }
+        */
+
+        inline string getDBDir() {
+            return m_dbDir;
+        }
+
+    protected:
         ExecutorContext *m_executorContext;
         string m_dbDir;
+
+        uint32_t m_nextBlockId;
+        int16_t m_ACID;
         long m_blockSize;
-        DbEnv* m_dbEnv;
-        Db* m_db; 
-        int16_t m_nextBlockId;
-	int m_partitionId; 
-
-        FILE* nvm_file;
-        char* m_NVMBlocks; 
-        int nvm_fd; 
-
-        /**
-         *  Maps a block id to a <index, size> pair
-         */
-		std::map<int16_t, pair<int, int32_t> > m_blockMap; 
-		
-		/**
-		 *  List of free block indexes before the end of the last allocated block.
-		 */
-        std::vector<int> m_NVMBlockFreeList; 
-		
-	int m_totalBlocks; 
-        int m_nextFreeBlock; 
-		
-		void shutdownNVM(); 
-		
-		void shutdownBerkeleyDB();
-		
-		void writeBlockNVM(const std::string tableName, 
-				   int16_t blockID, 
-				   const int tupleCount, 
-				   const char* data, 
-				   const long size); 
-				
-		void writeBlockBerkeleyDB(	const std::string tableName, 
-					   int16_t blockID, 
-					   const int tupleCount, 
-					   const char* data, 
-					   const long size);
-		
-        AntiCacheBlock readBlockNVM(std::string tableName, int16_t blockId); 
-
-        AntiCacheBlock readBlockBerkeleyDB(int16_t blockId);
+        int m_partitionId; 
+        int m_totalBlocks; 
         
-        /**
-         *   Returns a pointer to the start of the block at the specified index. 
-         */
-        char* getNVMBlock(int index); 
+
+        bool m_blocking;
+        bool m_block_merge;
+
+        AntiCacheDBType m_dbType;
+        int64_t m_maxDBSize;
         
-        /**
-         *    Adds the index to the free block list. 
+
+        /*
+         * stats
          */
-        void freeNVMBlock(int index);
+        int64_t m_bytesEvicted;
+        int32_t m_blocksEvicted;
+        int64_t m_bytesUnevicted;
+        int32_t m_blocksUnevicted;
+
+        //std::map<uint32_t, int> tupleInBlock;
+        //std::map <uint32_t, int> evictedTupleInBlock;
+        //std::map <uint32_t, long> blockSize;
+
+        voltdb::AntiCacheStats* m_stats;
         
-        /**
-         *   Returns the index of a free slot in the NVM block array. 
+        /* we need to test whether a deque or list is better. If we push/pop more than we
+         * remove, this is better. otherwise, let's use a list
          */
-        int getFreeNVMBlockIndex(); 
+
+        std::deque<uint32_t> m_block_lru;
+
+        /*
+         * DB specific method of shutting down the database on destructor call
+         */
+        virtual void shutdownDB() = 0;
+
         
 }; // CLASS
 

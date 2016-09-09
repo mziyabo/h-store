@@ -20,7 +20,7 @@
  */
 /* Copyright (C) 2008 by H-Store Project
  * Brown University
- * Massachusetts Institute of Technology
+ * Massachusetts In/stitute of Technology
  * Yale University
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -544,6 +544,7 @@ void Table::loadTuplesFromNoHeader(bool allowExport,
         m_tmpTarget1.setDeletedFalse();
         m_tmpTarget1.setDirtyFalse();
         m_tmpTarget1.setEvictedFalse();
+        m_tmpTarget1.setNVMEvictedFalse();
         m_tmpTarget1.deserializeFrom(serialize_io, stringPool);
 
         processLoadedTuple( allowExport, m_tmpTarget1);
@@ -618,4 +619,10 @@ void Table::loadTuplesFrom(bool allowExport,
 
     loadTuplesFromNoHeader( allowExport, serialize_io, stringPool);
 }
+
+#ifdef ANTICACHE
+std::vector<AntiCacheDB*> Table::allACDBs() const{
+    return std::vector<AntiCacheDB*>();
+}
+#endif
 }

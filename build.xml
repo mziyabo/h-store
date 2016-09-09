@@ -17,6 +17,10 @@
     </sequential>
 </macrodef>
 
+<tstamp>
+    <format property="TODAY" pattern="yyyy-MM-dd HH:mm:ss" />
+</tstamp>
+
 <!-- PATHS AND PROPERTIES -->
 
 <!-- make environment var foo available as env.foo -->
@@ -886,7 +890,10 @@ NATIVE EE STUFF
         <arg value="ANTICACHE_ENABLE=${site.anticache_enable}" />
         <arg value="ANTICACHE_BUILD=${site.anticache_build}" />
         <arg value="ANTICACHE_REVERSIBLE_LRU=${site.anticache_reversible_lru}" />
-	<arg value="ANTICACHE_NVM=${site.anticache_nvm}" />
+        <arg value="ANTICACHE_NVM=${site.anticache_nvm}" />
+        <arg value="ANTICACHE_COUNTER=${site.anticache_counter}" />
+        <arg value="ANTICACHE_TIMESTAMPS=${site.anticache_timestamps}" />
+        <arg value="ANTICACHE_TIMESTAMPS_PRIME=${site.anticache_timestamps_prime}" />
         <arg value="${build}" />
     </exec>
 </target>
@@ -1925,14 +1932,14 @@ UTILITIES
     <java fork="yes" failonerror="true" classname="edu.brown.catalog.CatalogInfo">
         <jvmarg value="-Dlog4j.configuration=${basedir}/log4j.properties"/>
         <arg value="catalog.jar=${jar}" />
-        <arg value="workload=${workload}" />
-        <arg value="workload.removedupes=true" />
-        <arg value="workload.xactlimit=${limit}" />
-        <arg value="workload.xactoffset=${offset}" />
-        <arg value="workload.sampling=${sampling}" />
-        <arg value="workload.procexclude=${exclude}" />
-        <arg value="workload.procinclude=${include}" />
-        <arg value="workload.procinclude.multiplier=${multiplier}" />
+<!--         <arg value="workload=${workload}" /> -->
+<!--         <arg value="workload.removedupes=true" /> -->
+<!--         <arg value="workload.xactlimit=${limit}" /> -->
+<!--         <arg value="workload.xactoffset=${offset}" /> -->
+<!--         <arg value="workload.sampling=${sampling}" /> -->
+<!--         <arg value="workload.procexclude=${exclude}" /> -->
+<!--         <arg value="workload.procinclude=${include}" /> -->
+<!--         <arg value="workload.procinclude.multiplier=${multiplier}" /> -->
         <classpath refid='project.classpath' />
         <assertions><enable /></assertions>
     </java>
@@ -2282,7 +2289,7 @@ UTILITIES
     </java>
 
     <echo>Creating stats file for workload '${target.workload}' using '${benchmark.tablestats}' as base</echo>
-    <antcall target="stats">
+    <antcall target="workload-stats">
         <param name="workload" value="${files.workloads.dir}/${target.workload}.trace.gz" />
         <param name="stats" value="${benchmark.tablestats}" />
         <param name="output" value="${files.stats.dir}/${project}.stats" />
@@ -2290,11 +2297,12 @@ UTILITIES
     <gzip src="${files.stats.dir}/${project}.stats" destfile="${files.stats.dir}/${project}.stats.gz"/>
     <delete file="${files.stats.dir}/${project}.stats" />
 
-    <echo>Creating mappings file for workload '${target.workload}'</echo>
-    <antcall target="mappings-generate">
-        <param name="workload" value="${files.workloads.dir}/${target.workload}.trace.gz" />
-        <param name="output" value="${files.mappings.dir}/${project}.mappings" />
-    </antcall>
+<!--     <echo>Creating mappings file for workload '${target.workload}'</echo> -->
+<!--     <antcall target="mappings-generate"> -->
+<!--         <param name="workload" value="${files.workloads.dir}/${target.workload}.trace.gz" /> -->
+<!--         <param name="output" value="${files.mappings.dir}/${project}.mappings" /> -->
+<!--         <param name="output" value="${project}.mappings" /> -->
+<!--     </antcall> -->
 </target>
 
 

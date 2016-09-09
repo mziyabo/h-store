@@ -87,7 +87,7 @@ CTX.CPPFLAGS = """-Wall -Wextra -Werror -Woverloaded-virtual -Wconversion
             -fno-omit-frame-pointer
             -fvisibility=hidden -DBOOST_SP_DISABLE_THREADS"""
 
-if gcc_major == 4 and gcc_minor >= 3:
+if (gcc_major == 4 and gcc_minor >= 3) or (gcc_major == 5):
     CTX.CPPFLAGS += " -Wno-ignored-qualifiers -fno-strict-aliasing"
 
 # linker flags
@@ -312,6 +312,9 @@ CTX.THIRD_PARTY_INPUT['json_spirit'] = """
  json_spirit_reader.cpp
  json_spirit_value.cpp
 """
+CTX.THIRD_PARTY_INPUT['mmh3'] = """
+ MurmurHash3.cpp
+"""
 
 ###############################################################################
 # SPECIFY THE TESTS
@@ -349,6 +352,7 @@ CTX.TESTS['expressions'] = """
 """
 
 CTX.TESTS['indexes'] = """
+ index_allocatortracker_test
  index_key_test
  index_multikey_test
  index_scripted_test
@@ -402,6 +406,15 @@ if CTX.ANTICACHE_BUILD:
     if CTX.ANTICACHE_DRAM:
         CTX.CPPFLAGS += " -DANTICACHE_DRAM"
 
+    if CTX.ANTICACHE_COUNTER:
+        CTX.CPPFLAGS += " -DANTICACHE_COUNTER"
+
+    if CTX.ANTICACHE_TIMESTAMPS:
+        CTX.CPPFLAGS += " -DANTICACHE_TIMESTAMPS"
+
+    if CTX.ANTICACHE_TIMESTAMPS_PRIME:
+        CTX.CPPFLAGS += " -DANTICACHE_TIMESTAMPS_PRIME"
+
     # Bring in berkeleydb library
     CTX.SYSTEM_DIRS.append(os.path.join(CTX.OUTPUT_PREFIX, 'berkeleydb'))
     CTX.THIRD_PARTY_STATIC_LIBS.extend([
@@ -412,10 +425,16 @@ if CTX.ANTICACHE_BUILD:
     CTX.INPUT['anticache'] = """
         EvictedTupleAccessException.cpp
         UnknownBlockAccessException.cpp
+        FullBackingStoreException.cpp
+        AntiCacheStats.cpp
         AntiCacheDB.cpp
+        BerkeleyAntiCacheDB.cpp
+        NVMAntiCacheDB.cpp
+        AllocatorNVMAntiCacheDB.cpp
         AntiCacheEvictionManager.cpp
         EvictionIterator.cpp
         EvictedTable.cpp
+        NVMEvictedTable.cpp
     """
     
     CTX.TESTS['anticache'] = """
